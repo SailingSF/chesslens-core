@@ -1,0 +1,504 @@
+{% extends "ui/base.html" %}
+{% block title %}Game Review — ChessLens{% endblock %}
+
+{% block content %}
+<h2>Game Review</h2>
+<p>Paste a PGN below and click Analyze. Click moves to step through the game on the board.</p>
+
+<div id="input-section">
+    <form id="review-form">
+        <label for="pgn-input">PGN</label>
+        <textarea id="pgn-input" rows="6" placeholder="[Event &quot;Casual Game&quot;]&#10;1. e4 e5 2. Nf3 Nc6 ..."></textarea>
+
+        <div class="grid">
+            <div>
+                <label for="color-select">I played as</label>
+                <select id="color-select">
+                    <option value="white" selected>White</option>
+                    <option value="black">Black</option>
+                </select>
+            </div>
+            <div>
+                <label for="skill-select">Explanation Level</label>
+                <select id="skill-select">
+                    <option value="beginner">Beginner</option>
+                    <option value="intermediate" selected>Intermediate</option>
+                    <option value="advanced">Advanced</option>
+                </select>
+            </div>
+            <div style="display:flex; align-items:end;">
+                <button type="submit" id="analyze-btn" style="width:100%;">Analyze</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div id="analysis-container" hidden>
+    <!-- Eval graph spans full width above the board+moves -->
+    <div id="eval-graph-container">
+        <canvas id="eval-graph"></canvas>
+    </div>
+
+    <div class="analysis-layout">
+        <div id="board-col">
+            <div id="board-wrapper">
+                <div id="board"></div>
+            </div>
+            <div id="board-controls">
+                <button id="btn-start" title="Start">&laquo;</button>
+                <button id="btn-prev" title="Previous">&lsaquo;</button>
+                <button id="btn-next" title="Next">&rsaquo;</button>
+                <button id="btn-end" title="End">&raquo;</button>
+                <button id="btn-flip" title="Flip board">&#x21C5;</button>
+            </div>
+            <div id="explanation-panel">
+                <em>Click a move to see analysis.</em>
+            </div>
+        </div>
+        <div id="moves-col">
+            <div id="move-list"></div>
+            <div id="analysis-status"></div>
+        </div>
+    </div>
+
+    <div id="game-summary" hidden>
+        <h3>Game Summary</h3>
+        <div id="summary-text"></div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    let board = null;
+    let positions = [];
+    let currentIndex = -1;
+    let startFen = 'start';
+    let orientation = 'white';
+
+    const form = document.getElementById('review-form');
+    const btn = document.getElementById('analyze-btn');
+    const container = document.getElementById('analysis-container');
+    const moveList = document.getElementById('move-list');
+    const explanationPanel = document.getElementById('explanation-panel');
+    const statusEl = document.getElementById('analysis-status');
+    const evalCanvas = document.getElementById('eval-graph');
+
+    const PIECE_THEME = 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png';
+    const summaryEl = document.getElementById('game-summary');
+    const summaryText = document.getElementById('summary-text');
+
+    function createBoard(fen) {
+        if (board) board.destroy();
+        board = Chessboard('board', {
+            position: fen || 'start',
+            pieceTheme: PIECE_THEME,
+        });
+    }
+
+    // Parse PGN client-side to get all positions
+    function parsePGN(pgn) {
+        const chess = new Chess();
+        if (!chess.load_pgn(pgn)) {
+            return null;
+        }
+        const moves = chess.history();
+        chess.reset();
+        startFen = chess.fen();
+
+        const result = [];
+        for (let i = 0; i < moves.length; i++) {
+            // Detect if truly forced (only 1 legal move)
+            const legalMoves = chess.moves();
+            const isForced = legalMoves.length === 1;
+
+            chess.move(moves[i]);
+            const fenAfter = chess.fen();
+            const fullMove = Math.floor(i / 2) + 1;
+            const color = (i % 2 === 0) ? 'white' : 'black';
+
+            result.push({
+                fen: fenAfter,
+                san: moves[i],
+                moveNumber: fullMove,
+                color: color,
+                index: i,
+                isForced: isForced,
+                // Filled in by SSE
+                evalCp: null,
+                mateIn: null,
+                cpLoss: null,
+                cpLossLabel: null,
+                priorityTier: null,
+                explanation: null,
+                analyzed: false,
+            });
+        }
+        return result;
+    }
+
+    // --- Eval Graph ---
+    function drawEvalGraph() {
+        const ctx = evalCanvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        const rect = evalCanvas.parentElement.getBoundingClientRect();
+        const W = rect.width;
+        const H = 80;
+        evalCanvas.width = W * dpr;
+        evalCanvas.height = H * dpr;
+        evalCanvas.style.width = W + 'px';
+        evalCanvas.style.height = H + 'px';
+        ctx.scale(dpr, dpr);
+
+        // Background
+        ctx.fillStyle = '#2a2a2a';
+        ctx.fillRect(0, 0, W, H);
+
+        // Midline (equal position)
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, H / 2);
+        ctx.lineTo(W, H / 2);
+        ctx.stroke();
+
+        // Collect eval points — only from analyzed moves
+        const points = [];
+        for (const pos of positions) {
+            if (pos.evalCp !== null) {
+                points.push({ index: pos.index, eval: pos.evalCp });
+            } else if (pos.mateIn !== null) {
+                // Mate: clamp to large value with correct sign
+                points.push({ index: pos.index, eval: pos.mateIn > 0 ? 1500 : -1500 });
+            }
+        }
+
+        if (points.length < 2) {
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Eval graph updates as analysis progresses...', W / 2, H / 2 + 4);
+            return;
+        }
+
+        const totalMoves = positions.length;
+        const maxEval = 1000; // Clamp display to ±10 pawns
+
+        function xFor(i) { return (i / Math.max(totalMoves - 1, 1)) * W; }
+        function yFor(cp) {
+            const clamped = Math.max(-maxEval, Math.min(maxEval, cp));
+            return H / 2 - (clamped / maxEval) * (H / 2 - 4);
+        }
+
+        // Fill area — white advantage above midline, black below
+        // Draw the filled area
+        ctx.beginPath();
+        ctx.moveTo(xFor(points[0].index), H / 2);
+        for (const p of points) {
+            ctx.lineTo(xFor(p.index), yFor(p.eval));
+        }
+        ctx.lineTo(xFor(points[points.length - 1].index), H / 2);
+        ctx.closePath();
+
+        // Use a gradient or split fill
+        ctx.save();
+        // White advantage (above midline)
+        ctx.clip();
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+        ctx.fillRect(0, 0, W, H / 2);
+        // Black advantage (below midline)
+        ctx.fillStyle = 'rgba(100, 100, 100, 0.4)';
+        ctx.fillRect(0, H / 2, W, H / 2);
+        ctx.restore();
+
+        // Draw the eval line
+        ctx.strokeStyle = '#ccc';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(xFor(points[0].index), yFor(points[0].eval));
+        for (let i = 1; i < points.length; i++) {
+            ctx.lineTo(xFor(points[i].index), yFor(points[i].eval));
+        }
+        ctx.stroke();
+
+        // Draw current move indicator
+        if (currentIndex >= 0) {
+            const x = xFor(currentIndex);
+            ctx.strokeStyle = 'rgba(66, 133, 244, 0.8)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, H);
+            ctx.stroke();
+        }
+
+        // Labels
+        ctx.fillStyle = '#aaa';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('White', 4, 12);
+        ctx.fillText('Black', 4, H - 4);
+    }
+
+    // Click on eval graph to jump to that move
+    evalCanvas.addEventListener('click', (e) => {
+        if (positions.length === 0) return;
+        const rect = evalCanvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const ratio = x / rect.width;
+        const idx = Math.round(ratio * (positions.length - 1));
+        selectMove(Math.max(0, Math.min(positions.length - 1, idx)));
+    });
+
+    // --- Move list ---
+    function renderMoveList() {
+        moveList.innerHTML = '';
+        for (let i = 0; i < positions.length; i += 2) {
+            const row = document.createElement('div');
+            row.className = 'move-row';
+
+            const num = document.createElement('span');
+            num.className = 'move-num';
+            num.textContent = positions[i].moveNumber + '.';
+            row.appendChild(num);
+
+            row.appendChild(createMoveCell(positions[i]));
+
+            if (i + 1 < positions.length) {
+                row.appendChild(createMoveCell(positions[i + 1]));
+            } else {
+                const empty = document.createElement('span');
+                empty.className = 'move-cell';
+                row.appendChild(empty);
+            }
+
+            moveList.appendChild(row);
+        }
+    }
+
+    function createMoveCell(pos) {
+        const cell = document.createElement('span');
+        cell.className = 'move-cell';
+        cell.dataset.index = pos.index;
+        cell.innerHTML = `<span class="move-san">${pos.san}</span>`;
+        cell.addEventListener('click', () => selectMove(pos.index));
+        return cell;
+    }
+
+    function badgeFor(pos) {
+        if (pos.analyzed && pos.cpLossLabel) {
+            return { cls: pos.cpLossLabel, text: pos.cpLossLabel };
+        }
+        // Only truly forced moves (1 legal option) get a special label
+        if (!pos.analyzed && pos.isForced) {
+            return { cls: 'forced', text: 'forced' };
+        }
+        return null;
+    }
+
+    function selectMove(index) {
+        currentIndex = index;
+        updateBoard();
+        updateMoveHighlight();
+        updateExplanation();
+        drawEvalGraph();
+    }
+
+    function updateBoard() {
+        if (!board) return;
+        if (currentIndex < 0) {
+            board.position(startFen);
+        } else {
+            board.position(positions[currentIndex].fen);
+        }
+    }
+
+    function updateMoveHighlight() {
+        document.querySelectorAll('.move-cell.selected').forEach(el => el.classList.remove('selected'));
+        if (currentIndex >= 0) {
+            const cell = document.querySelector(`.move-cell[data-index="${currentIndex}"]`);
+            if (cell) {
+                cell.classList.add('selected');
+                cell.scrollIntoView({ block: 'nearest' });
+            }
+        }
+    }
+
+    function updateExplanation() {
+        if (currentIndex < 0) {
+            explanationPanel.innerHTML = '<em>Starting position.</em>';
+            return;
+        }
+        const pos = positions[currentIndex];
+        const badge = badgeFor(pos);
+        let html = '<div class="explanation-header">';
+        html += `<strong>${pos.moveNumber}${pos.color === 'black' ? '...' : '.'} ${pos.san}</strong> `;
+        if (badge) {
+            html += `<span class="badge badge-${badge.cls}">${badge.text}</span>`;
+        }
+        if (pos.analyzed && pos.cpLoss !== null) {
+            html += ` <span class="cp-value">(${pos.cpLoss} cp)</span>`;
+        }
+        html += '</div>';
+
+        if (pos.explanation) {
+            html += `<div class="explanation-text">${marked.parse(pos.explanation)}</div>`;
+        } else if (pos.isForced) {
+            html += `<p class="explanation-text"><em>Only legal move — skipped analysis.</em></p>`;
+        } else if (pos.analyzed) {
+            html += `<p class="explanation-text"><em>Solid move, no issues.</em></p>`;
+        }
+
+        explanationPanel.innerHTML = html;
+    }
+
+    function updateMoveCell(index) {
+        const cell = document.querySelector(`.move-cell[data-index="${index}"]`);
+        if (!cell) return;
+        const pos = positions[index];
+        const existing = cell.querySelector('.badge');
+        if (existing) existing.remove();
+
+        const badge = badgeFor(pos);
+        if (badge) {
+            const el = document.createElement('span');
+            el.className = `badge badge-${badge.cls}`;
+            el.textContent = badge.text;
+            cell.appendChild(el);
+        }
+    }
+
+    // Navigation
+    document.getElementById('btn-start').addEventListener('click', () => selectMove(-1));
+    document.getElementById('btn-prev').addEventListener('click', () => {
+        if (currentIndex > -1) selectMove(currentIndex - 1);
+    });
+    document.getElementById('btn-next').addEventListener('click', () => {
+        if (currentIndex < positions.length - 1) selectMove(currentIndex + 1);
+    });
+    document.getElementById('btn-end').addEventListener('click', () => {
+        if (positions.length > 0) selectMove(positions.length - 1);
+    });
+    document.getElementById('btn-flip').addEventListener('click', () => {
+        orientation = orientation === 'white' ? 'black' : 'white';
+        board.orientation(orientation);
+    });
+
+    // Keyboard navigation
+    document.addEventListener('keydown', (e) => {
+        if (container.hidden) return;
+        if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+        if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            if (currentIndex > -1) selectMove(currentIndex - 1);
+        } else if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            if (currentIndex < positions.length - 1) selectMove(currentIndex + 1);
+        }
+    });
+
+    // Form submit
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const pgn = document.getElementById('pgn-input').value.trim();
+        if (!pgn) return;
+
+        const parsed = parsePGN(pgn);
+        if (!parsed || parsed.length === 0) {
+            alert('Could not parse PGN. Please check the format.');
+            return;
+        }
+
+        positions = parsed;
+        currentIndex = -1;
+
+        btn.disabled = true;
+        btn.setAttribute('aria-busy', 'true');
+        btn.textContent = 'Analyzing...';
+
+        // Auto-orient board to player's perspective
+        orientation = document.getElementById('color-select').value;
+
+        container.hidden = false;
+        summaryEl.hidden = true;
+        createBoard(startFen);
+        board.orientation(orientation);
+        renderMoveList();
+        drawEvalGraph();
+        updateExplanation();
+        statusEl.innerHTML = '<small aria-busy="true">Analyzing moves...</small>';
+
+        try {
+            const resp = await fetch('/api/game-review/', {
+                method: 'POST',
+                headers: ChessLens.apiHeaders(),
+                body: JSON.stringify({
+                    pgn: pgn,
+                    skill_level: document.getElementById('skill-select').value,
+                    player_color: document.getElementById('color-select').value,
+                }),
+            });
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, {stream: true});
+
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const data = JSON.parse(line.slice(6));
+                    if (data.done) {
+                        if (data.summary) {
+                            summaryText.innerHTML = marked.parse(data.summary);
+                            summaryEl.hidden = false;
+                        }
+                        break;
+                    }
+
+                    const match = positions.find(p =>
+                        p.moveNumber === data.move_number && p.color === data.color
+                    );
+                    if (match) {
+                        match.evalCp = data.eval_cp;
+                        match.mateIn = data.mate_in;
+                        match.cpLoss = data.cp_loss;
+                        match.cpLossLabel = data.cp_loss_label;
+                        match.priorityTier = data.priority_tier;
+                        match.explanation = data.explanation;
+                        match.analyzed = true;
+                        updateMoveCell(match.index);
+                        drawEvalGraph();
+                        if (currentIndex === match.index) {
+                            updateExplanation();
+                        }
+                    }
+                }
+            }
+            // Final badge pass for forced moves that weren't analyzed
+            for (const pos of positions) {
+                if (!pos.analyzed) updateMoveCell(pos.index);
+            }
+            drawEvalGraph();
+            statusEl.innerHTML = '<small>Analysis complete.</small>';
+        } catch (err) {
+            statusEl.innerHTML = `<small>Error: ${err.message}</small>`;
+        } finally {
+            btn.disabled = false;
+            btn.removeAttribute('aria-busy');
+            btn.textContent = 'Analyze';
+        }
+    });
+
+    window.addEventListener('resize', () => {
+        if (board) board.resize();
+        if (positions.length > 0) drawEvalGraph();
+    });
+});
+</script>
+{% endblock %}

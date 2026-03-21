@@ -1,0 +1,74 @@
+{% extends "ui/base.html" %}
+{% block title %}ChessLens — Local Analysis{% endblock %}
+
+{% block content %}
+<hgroup>
+    <h1>ChessLens</h1>
+    <p>Open-source chess analysis powered by Stockfish + Claude AI</p>
+</hgroup>
+
+<section id="api-key-section">
+    <article>
+        <h3>API Key Setup</h3>
+        <p>
+            ChessLens uses Claude to explain positions in plain language.
+            Your key is stored only in your browser and sent directly to the local server.
+        </p>
+        <fieldset role="group">
+            <input type="password" id="api-key-input"
+                   placeholder="sk-ant-api03-..."
+                   aria-label="Anthropic API Key">
+            <button id="save-key-btn">Save Key</button>
+        </fieldset>
+        <small id="key-status"></small>
+    </article>
+</section>
+
+<div class="grid">
+    <article>
+        <h3>Game Review</h3>
+        <p>Paste a PGN and get move-by-move analysis with plain-language explanations of mistakes and key moments.</p>
+        <a href="{% url 'ui:game-review' %}" role="button">Analyze a Game</a>
+    </article>
+    <article>
+        <h3>Position Explorer</h3>
+        <p>Enter a FEN or set up a position on the board. Get engine evaluation and an AI explanation.</p>
+        <a href="{% url 'ui:position-explorer' %}" role="button" class="secondary">Explore a Position</a>
+    </article>
+</div>
+
+<article>
+    <h3>Looking for the full experience?</h3>
+    <p>
+        <a href="https://chesslens.ai" target="_blank" rel="noopener">chesslens.ai</a>
+        offers bot matches with live coaching, opening lab, and more — no setup required.
+    </p>
+</article>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const input = document.getElementById('api-key-input');
+    const btn = document.getElementById('save-key-btn');
+    const status = document.getElementById('key-status');
+
+    // Show current state
+    const existing = localStorage.getItem('chesslens_api_key');
+    if (existing) {
+        status.textContent = 'API key is saved.';
+        input.placeholder = 'Key saved — enter a new one to replace';
+    }
+
+    btn.addEventListener('click', () => {
+        const key = input.value.trim();
+        if (!key) {
+            status.textContent = 'Please enter a key.';
+            return;
+        }
+        localStorage.setItem('chesslens_api_key', key);
+        input.value = '';
+        input.placeholder = 'Key saved — enter a new one to replace';
+        status.textContent = 'API key saved to browser storage.';
+    });
+});
+</script>
+{% endblock %}

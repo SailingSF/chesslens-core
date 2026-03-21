@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}ChessLens{% endblock %}</title>
+
+    <!-- Pico CSS — classless styling -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+
+    <!-- chessboard.js styles -->
+    <link rel="stylesheet"
+          href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+
+    {% load static %}
+    <link rel="stylesheet" href="{% static 'ui/app.css' %}">
+</head>
+<body>
+    <header class="container">
+        <nav>
+            <ul>
+                <li><a href="{% url 'ui:index' %}"><strong>ChessLens</strong></a></li>
+            </ul>
+            <ul>
+                <li><a href="{% url 'ui:game-review' %}">Game Review</a></li>
+                <li><a href="{% url 'ui:position-explorer' %}">Position Explorer</a></li>
+                <li><a href="https://chesslens.ai" target="_blank" rel="noopener">chesslens.ai &rarr;</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="container">
+        <small>
+            <a href="https://github.com/chesslens/chesslens-core" target="_blank" rel="noopener">GitHub</a> &middot;
+            Open-source chess analysis powered by Stockfish + Claude
+        </small>
+    </footer>
+
+    <!-- jQuery (required by chessboard.js) -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <!-- chess.js for move validation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <!-- chessboard.js for board rendering -->
+    <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+    <!-- marked.js for rendering markdown from LLM responses -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+
+    {% load static %}
+    <script src="{% static 'ui/app.js' %}"></script>
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

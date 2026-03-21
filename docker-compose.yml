@@ -1,0 +1,27 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ENGINE_URL=http://engine:8001
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite:///db.sqlite3
+      - DEBUG=True
+    depends_on:
+      - engine
+      - redis
+    volumes:
+      - .:/app
+    command: daphne -b 0.0.0.0 -p 8000 config.asgi:application
+
+  engine:
+    build: ./engine_service
+    ports:
+      - "8001:8001"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"

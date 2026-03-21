@@ -1,0 +1,114 @@
+{% extends "ui/base.html" %}
+{% block title %}Position Explorer — ChessLens{% endblock %}
+
+{% block content %}
+<h2>Position Explorer</h2>
+<p>Enter a FEN string or use the starting position. Click Analyze to get an engine evaluation and AI explanation.</p>
+
+<div class="grid">
+    <div>
+        <div id="board" style="width: 100%; max-width: 400px;"></div>
+    </div>
+    <div>
+        <form id="position-form">
+            <label for="fen-input">FEN</label>
+            <input type="text" id="fen-input"
+                   value="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+                   placeholder="Paste FEN here">
+
+            <fieldset role="group">
+                <button type="button" id="set-fen-btn" class="secondary">Set Board</button>
+                <button type="submit" id="analyze-btn">Analyze</button>
+            </fieldset>
+
+            <label for="skill-select">Explanation Level</label>
+            <select id="skill-select">
+                <option value="beginner">Beginner</option>
+                <option value="intermediate" selected>Intermediate</option>
+                <option value="advanced">Advanced</option>
+            </select>
+        </form>
+
+        <article id="result-card" hidden>
+            <header>Analysis</header>
+            <dl>
+                <dt>Best Move</dt>
+                <dd id="res-best-move">—</dd>
+                <dt>Evaluation</dt>
+                <dd id="res-cp">—</dd>
+                <dt>Priority</dt>
+                <dd id="res-priority">—</dd>
+                <dt>Opening</dt>
+                <dd id="res-opening">—</dd>
+            </dl>
+            <blockquote id="res-explanation"></blockquote>
+        </article>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const board = Chessboard('board', {
+        position: 'start',
+        draggable: false,
+        pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
+    });
+
+    document.getElementById('set-fen-btn').addEventListener('click', () => {
+        const fen = document.getElementById('fen-input').value.trim();
+        if (fen) board.position(fen);
+    });
+
+    const form = document.getElementById('position-form');
+    const btn = document.getElementById('analyze-btn');
+    const card = document.getElementById('result-card');
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fen = document.getElementById('fen-input').value.trim();
+        if (!fen) return;
+
+        btn.disabled = true;
+        btn.setAttribute('aria-busy', 'true');
+        btn.textContent = 'Analyzing...';
+        card.hidden = true;
+
+        const headers = {'Content-Type': 'application/json'};
+        const apiKey = localStorage.getItem('chesslens_api_key');
+        if (apiKey) headers['X-Anthropic-Key'] = apiKey;
+
+        try {
+            const resp = await fetch('/api/position-explorer/', {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({
+                    fen: fen,
+                    skill_level: document.getElementById('skill-select').value,
+                }),
+            });
+
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(`${resp.status}: ${text}`);
+            }
+
+            const data = await resp.json();
+            document.getElementById('res-best-move').textContent = data.best_move || '—';
+            document.getElementById('res-cp').textContent = data.cp !== null ? `${data.cp} cp` : '—';
+            document.getElementById('res-priority').textContent = data.priority_tier;
+            document.getElementById('res-opening').textContent =
+                data.opening ? `${data.eco} — ${data.opening}` : '—';
+            document.getElementById('res-explanation').textContent = data.explanation;
+            card.hidden = false;
+        } catch (err) {
+            document.getElementById('res-explanation').textContent = `Error: ${err.message}`;
+            card.hidden = false;
+        } finally {
+            btn.disabled = false;
+            btn.removeAttribute('aria-busy');
+            btn.textContent = 'Analyze';
+        }
+    });
+});
+</script>
+{% endblock %}

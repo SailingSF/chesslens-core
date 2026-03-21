@@ -1,0 +1,234 @@
+/* ChessLens UI — minimal overrides on top of Pico CSS */
+
+/* Board wrapper — give chessboard.js a concrete width */
+#board-wrapper {
+    width: 400px;
+    max-width: 100%;
+}
+
+#board .board-b72b1 {
+    border: 2px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+}
+
+#result-card blockquote {
+    margin-top: 1rem;
+    font-style: italic;
+}
+
+footer {
+    margin-top: 3rem;
+    text-align: center;
+    opacity: 0.7;
+}
+
+/* --- Eval Graph --- */
+
+#eval-graph-container {
+    margin-bottom: 1rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    overflow: hidden;
+    cursor: pointer;
+}
+
+#eval-graph {
+    display: block;
+    width: 100%;
+}
+
+/* --- Game Review Layout --- */
+
+.analysis-layout {
+    display: grid;
+    grid-template-columns: minmax(300px, 420px) 1fr;
+    gap: 1.5rem;
+    align-items: start;
+}
+
+@media (max-width: 768px) {
+    .analysis-layout {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Board controls */
+#board-controls {
+    display: flex;
+    gap: 0.4rem;
+    justify-content: center;
+    margin: 0.5rem 0;
+}
+
+#board-controls button {
+    padding: 0.3rem 0.7rem;
+    font-size: 1.1rem;
+    min-width: 2.2rem;
+}
+
+/* Explanation panel */
+#explanation-panel {
+    margin-top: 0.75rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    min-height: 4rem;
+    background: var(--pico-card-background-color);
+}
+
+.explanation-header {
+    margin-bottom: 0.4rem;
+}
+
+.explanation-text {
+    margin: 0;
+    line-height: 1.5;
+}
+
+.cp-value {
+    opacity: 0.6;
+    font-size: 0.85em;
+}
+
+/* Move list */
+#moves-col {
+    min-width: 0;
+}
+
+#move-list {
+    max-height: 480px;
+    overflow-y: auto;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    padding: 0.25rem;
+    background: var(--pico-card-background-color);
+}
+
+.move-row {
+    display: flex;
+    gap: 0.25rem;
+    padding: 1px 0;
+    align-items: center;
+}
+
+.move-num {
+    width: 2.2rem;
+    text-align: right;
+    opacity: 0.5;
+    font-size: 0.85em;
+    flex-shrink: 0;
+    padding-right: 0.25rem;
+}
+
+.move-cell {
+    flex: 1;
+    padding: 3px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    min-width: 0;
+}
+
+.move-cell:hover {
+    background: var(--pico-secondary-hover);
+}
+
+.move-cell.selected {
+    background: var(--pico-primary-focus);
+}
+
+.move-san {
+    font-weight: 600;
+}
+
+/* Assessment badges */
+.badge {
+    font-size: 0.7em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    white-space: nowrap;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.badge-best {
+    background: #27ae60;
+    color: #fff;
+}
+
+.badge-excellent {
+    background: #2ecc71;
+    color: #000;
+}
+
+.badge-good {
+    background: #82c91e;
+    color: #000;
+}
+
+.badge-inaccuracy {
+    background: #f1c40f;
+    color: #000;
+}
+
+.badge-mistake {
+    background: #e67e22;
+    color: #fff;
+}
+
+.badge-blunder {
+    background: #e74c3c;
+    color: #fff;
+}
+
+.badge-unknown {
+    background: #7f8c8d;
+    color: #fff;
+}
+
+.badge-book {
+    background: #5b6abf;
+    color: #fff;
+}
+
+.badge-forced {
+    background: #555;
+    color: #aaa;
+}
+
+#analysis-status {
+    margin-top: 0.5rem;
+    text-align: center;
+}
+
+/* --- Game Summary --- */
+
+#game-summary {
+    margin-top: 1.5rem;
+    padding: 1rem 1.25rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: var(--pico-card-background-color);
+}
+
+#game-summary h3 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+}
+
+#summary-text p {
+    line-height: 1.6;
+}
+
+/* --- Markdown in explanations --- */
+
+.explanation-text p {
+    margin: 0 0 0.3rem 0;
+}
+
+.explanation-text p:last-child {
+    margin-bottom: 0;
+}

@@ -1,0 +1,29 @@
+# Web framework
+django>=4.2,<5.2
+djangorestframework>=3.14
+django-cors-headers>=4.3
+
+# Real-time / WebSocket
+channels>=4.0
+channels-redis>=4.1
+daphne>=4.0
+
+# Task queue & cache
+redis>=5.0
+rq>=1.16
+
+# Chess
+python-chess>=1.10
+
+# AI
+anthropic>=0.34
+
+# Utilities
+python-dotenv>=1.0
+requests>=2.31
+httpx>=0.25
+
+# Dev / testing
+pytest>=8.0
+pytest-django>=4.8
+pytest-asyncio>=0.24
