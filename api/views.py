@@ -138,6 +138,27 @@ async def position_explorer(request):
     context = _assembler.assemble(board, result)
     priority = classify(result, board=board)
 
+    # Build candidate list with SAN notation
+    candidates = []
+    for candidate in result.candidates:
+        # Convert move to SAN
+        move_san = board.san(candidate.move)
+        # Convert PV to SAN
+        pv_san = []
+        temp = board.copy()
+        for pv_move in candidate.pv[:6]:
+            try:
+                pv_san.append(temp.san(pv_move))
+                temp.push(pv_move)
+            except Exception:
+                break
+        candidates.append({
+            "move": move_san,
+            "cp": candidate.score_cp,
+            "mate_in": candidate.mate_in,
+            "pv": pv_san,
+        })
+
     api_key = getattr(request, "anthropic_api_key", None)
     explainer = get_explainer()
     explanation = await explainer.generate(context, priority, skill_level, api_key=api_key)
@@ -148,6 +169,7 @@ async def position_explorer(request):
         "best_move": context.best_move_san,
         "pv": context.pv_san,
         "cp": context.best_move_cp,
+        "candidates": candidates,
         "opening": context.opening_name,
         "eco": context.eco_code,
     })

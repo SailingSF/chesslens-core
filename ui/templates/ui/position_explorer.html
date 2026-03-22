@@ -3,65 +3,210 @@
 
 {% block content %}
 <h2>Position Explorer</h2>
-<p>Enter a FEN string or use the starting position. Click Analyze to get an engine evaluation and AI explanation.</p>
+<p>Set up a position by dragging pieces on the board, then analyze to see the top engine moves with AI explanations.</p>
 
-<div class="grid">
+<div class="explorer-layout">
+    <!-- Left column: board + controls -->
     <div>
-        <div id="board" style="width: 100%; max-width: 400px;"></div>
+        <div id="board-wrapper">
+            <div id="board" style="width: 100%;"></div>
+        </div>
+
+        <div id="board-controls">
+            <button type="button" id="start-btn" class="secondary outline" title="Starting position">Start</button>
+            <button type="button" id="clear-btn" class="secondary outline" title="Clear board">Clear</button>
+            <button type="button" id="flip-btn" class="secondary outline" title="Flip board">Flip</button>
+        </div>
+
+        <div id="turn-select-row">
+            <label>Side to move:</label>
+            <fieldset role="group">
+                <button type="button" id="turn-white" class="turn-btn active">White</button>
+                <button type="button" id="turn-black" class="turn-btn">Black</button>
+            </fieldset>
+        </div>
+
+        <label for="fen-input">FEN</label>
+        <input type="text" id="fen-input"
+               value="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+               placeholder="Paste FEN or set up pieces above">
+        <button type="button" id="set-fen-btn" class="secondary" style="width:100%; margin-bottom:1rem;">Load FEN</button>
     </div>
+
+    <!-- Right column: analysis controls + results -->
     <div>
         <form id="position-form">
-            <label for="fen-input">FEN</label>
-            <input type="text" id="fen-input"
-                   value="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-                   placeholder="Paste FEN here">
-
-            <fieldset role="group">
-                <button type="button" id="set-fen-btn" class="secondary">Set Board</button>
-                <button type="submit" id="analyze-btn">Analyze</button>
-            </fieldset>
-
             <label for="skill-select">Explanation Level</label>
             <select id="skill-select">
                 <option value="beginner">Beginner</option>
                 <option value="intermediate" selected>Intermediate</option>
                 <option value="advanced">Advanced</option>
             </select>
+            <button type="submit" id="analyze-btn" style="width:100%;">Analyze Position</button>
         </form>
 
         <article id="result-card" hidden>
-            <header>Analysis</header>
-            <dl>
-                <dt>Best Move</dt>
-                <dd id="res-best-move">—</dd>
-                <dt>Evaluation</dt>
-                <dd id="res-cp">—</dd>
-                <dt>Priority</dt>
-                <dd id="res-priority">—</dd>
-                <dt>Opening</dt>
-                <dd id="res-opening">—</dd>
-            </dl>
-            <blockquote id="res-explanation"></blockquote>
+            <header>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <strong>Engine Analysis</strong>
+                    <small id="res-opening" style="opacity:0.7;"></small>
+                </div>
+            </header>
+
+            <div id="candidates-list"></div>
+
+            <div id="res-explanation-section" style="margin-top:1rem;">
+                <strong>AI Explanation</strong>
+                <div id="res-explanation" class="explanation-text" style="margin-top:0.5rem;"></div>
+            </div>
         </article>
     </div>
 </div>
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-    const board = Chessboard('board', {
-        position: 'start',
-        draggable: false,
-        pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
-    });
+    let currentTurn = 'w';
 
+    // --- Board setup ---
+    const boardConfig = {
+        position: 'start',
+        draggable: true,
+        sparePieces: true,
+        dropOffBoard: 'trash',
+        pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
+        onChange: onBoardChange,
+    };
+    const board = Chessboard('board', boardConfig);
+
+    function buildFenFromBoard() {
+        const pos = board.position();
+        // Build piece placement from position object
+        let rows = [];
+        for (let r = 8; r >= 1; r--) {
+            let row = '';
+            let empty = 0;
+            for (let c = 0; c < 8; c++) {
+                const file = 'abcdefgh'[c];
+                const sq = file + r;
+                const piece = pos[sq];
+                if (piece) {
+                    if (empty > 0) { row += empty; empty = 0; }
+                    // chessboard.js uses wK, bQ etc
+                    const color = piece[0]; // w or b
+                    const type = piece[1];  // K, Q, R, B, N, P
+                    row += color === 'w' ? type : type.toLowerCase();
+                } else {
+                    empty++;
+                }
+            }
+            if (empty > 0) row += empty;
+            rows.push(row);
+        }
+        return rows.join('/') + ' ' + currentTurn + ' KQkq - 0 1';
+    }
+
+    function onBoardChange() {
+        // Small delay to let chessboard.js finish updating
+        setTimeout(() => {
+            document.getElementById('fen-input').value = buildFenFromBoard();
+        }, 0);
+    }
+
+    // Load FEN button
     document.getElementById('set-fen-btn').addEventListener('click', () => {
         const fen = document.getElementById('fen-input').value.trim();
-        if (fen) board.position(fen);
+        if (!fen) return;
+        board.position(fen);
+        // Extract turn from FEN
+        const parts = fen.split(' ');
+        if (parts.length >= 2) {
+            currentTurn = parts[1] === 'b' ? 'b' : 'w';
+            updateTurnButtons();
+        }
     });
 
+    // Board control buttons
+    document.getElementById('start-btn').addEventListener('click', () => {
+        board.start();
+        currentTurn = 'w';
+        updateTurnButtons();
+        document.getElementById('fen-input').value =
+            'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    });
+
+    document.getElementById('clear-btn').addEventListener('click', () => {
+        board.clear();
+        currentTurn = 'w';
+        updateTurnButtons();
+        document.getElementById('fen-input').value = '8/8/8/8/8/8/8/8 w - - 0 1';
+    });
+
+    document.getElementById('flip-btn').addEventListener('click', () => {
+        board.flip();
+    });
+
+    // Turn selector
+    function updateTurnButtons() {
+        document.getElementById('turn-white').classList.toggle('active', currentTurn === 'w');
+        document.getElementById('turn-black').classList.toggle('active', currentTurn === 'b');
+    }
+
+    document.getElementById('turn-white').addEventListener('click', () => {
+        currentTurn = 'w';
+        updateTurnButtons();
+        document.getElementById('fen-input').value = buildFenFromBoard();
+    });
+
+    document.getElementById('turn-black').addEventListener('click', () => {
+        currentTurn = 'b';
+        updateTurnButtons();
+        document.getElementById('fen-input').value = buildFenFromBoard();
+    });
+
+    // --- Analysis ---
     const form = document.getElementById('position-form');
     const btn = document.getElementById('analyze-btn');
     const card = document.getElementById('result-card');
+
+    function formatEval(cp, mateIn) {
+        if (mateIn !== null && mateIn !== undefined) {
+            return mateIn > 0 ? `M${mateIn}` : `M${Math.abs(mateIn)}`;
+        }
+        if (cp === null || cp === undefined) return '?';
+        const sign = cp >= 0 ? '+' : '';
+        return sign + (cp / 100).toFixed(2);
+    }
+
+    function evalClass(cp, mateIn) {
+        if (mateIn !== null && mateIn !== undefined) {
+            return mateIn > 0 ? 'eval-winning' : 'eval-losing';
+        }
+        if (cp === null || cp === undefined) return '';
+        if (cp > 100) return 'eval-winning';
+        if (cp < -100) return 'eval-losing';
+        return 'eval-equal';
+    }
+
+    function renderCandidates(candidates) {
+        const container = document.getElementById('candidates-list');
+        container.innerHTML = '';
+
+        candidates.forEach((cand, i) => {
+            const rank = i + 1;
+            const evalStr = formatEval(cand.cp, cand.mate_in);
+            const cls = evalClass(cand.cp, cand.mate_in);
+            const pvStr = cand.pv.join(' ');
+
+            const div = document.createElement('div');
+            div.className = 'candidate-row';
+            div.innerHTML =
+                '<div class="candidate-rank">' + rank + '</div>' +
+                '<div class="candidate-move">' + cand.move + '</div>' +
+                '<div class="candidate-eval ' + cls + '">' + evalStr + '</div>' +
+                '<div class="candidate-pv">' + pvStr + '</div>';
+            container.appendChild(div);
+        });
+    }
 
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -89,24 +234,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!resp.ok) {
                 const text = await resp.text();
-                throw new Error(`${resp.status}: ${text}`);
+                throw new Error(resp.status + ': ' + text);
             }
 
             const data = await resp.json();
-            document.getElementById('res-best-move').textContent = data.best_move || '—';
-            document.getElementById('res-cp').textContent = data.cp !== null ? `${data.cp} cp` : '—';
-            document.getElementById('res-priority').textContent = data.priority_tier;
-            document.getElementById('res-opening').textContent =
-                data.opening ? `${data.eco} — ${data.opening}` : '—';
-            document.getElementById('res-explanation').textContent = data.explanation;
+
+            // Opening info
+            const openingEl = document.getElementById('res-opening');
+            openingEl.textContent = data.opening
+                ? data.eco + ' — ' + data.opening
+                : '';
+
+            // Render candidate moves
+            renderCandidates(data.candidates || []);
+
+            // Explanation (render as markdown)
+            const explEl = document.getElementById('res-explanation');
+            if (typeof marked !== 'undefined' && marked.parse) {
+                explEl.innerHTML = marked.parse(data.explanation || '');
+            } else {
+                explEl.textContent = data.explanation || '';
+            }
+
             card.hidden = false;
         } catch (err) {
-            document.getElementById('res-explanation').textContent = `Error: ${err.message}`;
+            document.getElementById('candidates-list').innerHTML = '';
+            const explEl = document.getElementById('res-explanation');
+            explEl.textContent = 'Error: ' + err.message;
+            document.getElementById('res-opening').textContent = '';
             card.hidden = false;
         } finally {
             btn.disabled = false;
             btn.removeAttribute('aria-busy');
-            btn.textContent = 'Analyze';
+            btn.textContent = 'Analyze Position';
         }
     });
 });
