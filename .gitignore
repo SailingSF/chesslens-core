@@ -12,3 +12,4 @@ build/
 htmlcov/
 staticfiles/
 specifications/
+tests/test_games/
