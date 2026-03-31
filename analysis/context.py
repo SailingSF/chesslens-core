@@ -65,6 +65,11 @@ class AssembledContext:
     opponent_elo: Optional[int] = None       # stored for context
     wdl_source: str = "sigmoid"              # "sigmoid" or "native"
 
+    # Candidate analysis
+    is_engine_top_move: bool = False         # played move == engine's #1 candidate
+    candidate_gap_cp: Optional[int] = None   # centipawn gap between 1st and 2nd best candidate
+    candidate_gap_wp: Optional[float] = None # win probability gap between 1st and 2nd best
+
     # Special classification flags
     is_brilliant: bool = False
     is_great: bool = False
@@ -137,7 +142,7 @@ class ContextAssembler:
         best_move_san = board.san(best.move)
         pv_san = self._pv_to_san(board, best.pv)
 
-        # --- Raw centipawn loss (unchanged from original) ---
+        # --- Raw centipawn loss ---
         cp_loss = None
         played_move_san = None
         played_candidate = None
@@ -148,6 +153,13 @@ class ContextAssembler:
             best_cp = best.score_cp if best.score_cp is not None else _mate_to_cp(best.mate_in)
             if played_cp is not None and best_cp is not None:
                 cp_loss = abs(best_cp - played_cp)
+
+        # --- Candidate analysis: is this the engine's top pick? ---
+        is_engine_top = False
+        candidate_gap_cp = None
+        candidate_gap_wp = None
+        if played_move is not None:
+            is_engine_top = (played_move == best.move)
 
         # --- EP-based classification ---
         provider = resolve_provider(engine_result, self._config, player_elo=player_elo)
@@ -167,20 +179,58 @@ class ContextAssembler:
                 wdl_loss=played_candidate.wdl_loss,
             )
 
+        # Candidate gap: how much better is the best move than the 2nd best?
+        # This measures move uniqueness — large gap means this was the "only good move".
+        if len(engine_result.candidates) >= 2:
+            second = engine_result.candidates[1]
+            second_cp = second.score_cp if second.score_cp is not None else _mate_to_cp(second.mate_in)
+            best_cp_raw = best.score_cp if best.score_cp is not None else _mate_to_cp(best.mate_in)
+            if best_cp_raw is not None and second_cp is not None:
+                candidate_gap_cp = abs(best_cp_raw - second_cp)
+
+            second_wp = provider.get_win_pct(
+                cp=second.score_cp, mate_in=second.mate_in, elo=player_elo,
+                wdl_win=second.wdl_win, wdl_draw=second.wdl_draw,
+                wdl_loss=second.wdl_loss,
+            )
+            if best_win_pct is not None and second_wp is not None:
+                if board.turn == chess.WHITE:
+                    candidate_gap_wp = max(0.0, best_win_pct - second_wp)
+                else:
+                    candidate_gap_wp = max(0.0, second_wp - best_win_pct)
+
         ep_loss_val = None
         if best_win_pct is not None and played_win_pct is not None:
-            # Win probabilities are from white's perspective (score.white()).
-            # For white moves: losing EP means best_wp > played_wp (eval dropped).
-            # For black moves: losing EP means played_wp > best_wp (white got better,
-            # i.e. black got worse). Equivalently: black's wp = 1 - white's wp,
-            # so black's EP loss = (1-best_wp) - (1-played_wp) = played_wp - best_wp.
             if board.turn == chess.WHITE:
                 ep_loss_val = max(0.0, best_win_pct - played_win_pct)
             else:
                 ep_loss_val = max(0.0, played_win_pct - best_win_pct)
 
-        # Primary label from EP (replaces old cp-based classification)
-        label = classify_ep_loss(ep_loss_val, self._config)
+        # --- Base classification ---
+        # Step 1: classify by EP loss thresholds
+        # At low Elo, tighten the "excellent" threshold — the sigmoid curve
+        # is flatter so small EP losses are less meaningful. Chess.com uses
+        # a higher bar for "excellent" at lower Elo.
+        effective_config = self._config
+        if player_elo is not None and player_elo < self._config.excellent_elo_threshold:
+            from dataclasses import replace as _replace
+            effective_config = _replace(
+                self._config,
+                ep_excellent=self._config.ep_excellent_low_elo,
+            )
+        label = classify_ep_loss(ep_loss_val, effective_config)
+
+        # Step 2: if the played move is the engine's exact top choice AND
+        # there's a meaningful gap to alternatives, promote to "best".
+        # When multiple moves are nearly equal (small candidate gap),
+        # being engine #1 is noise — leave as "excellent".
+        if is_engine_top and label in ("best", "excellent"):
+            min_gap = self._config.best_promotion_min_gap_cp
+            if candidate_gap_cp is not None and candidate_gap_cp >= min_gap:
+                label = "best"
+            elif candidate_gap_cp is None:
+                # No candidate gap info (single-PV analysis) — promote anyway
+                label = "best"
 
         # --- Special classification checks ---
         is_brilliant = False
@@ -190,7 +240,7 @@ class ContextAssembler:
         if played_move is not None and ep_loss_val is not None and best_win_pct is not None and played_win_pct is not None:
             side = board.turn
 
-            # Check Brilliant
+            # Check Brilliant (sacrifice-based, unchanged)
             board_after = board.copy()
             board_after.push(played_move)
             is_brilliant = detect_brilliant(
@@ -200,13 +250,16 @@ class ContextAssembler:
                 side=side, elo=player_elo, config=self._config,
             )
 
-            # Check Great Move
+            # Check Great Move — driven by candidate gap + filters
             is_great = detect_great(
                 ep_loss=ep_loss_val, win_pct_before=best_win_pct,
                 win_pct_after=played_win_pct,
                 candidates=engine_result.candidates,
-                provider=provider, elo=player_elo, config=self._config,
+                provider=provider, board=board, move=played_move,
+                elo=player_elo, config=self._config,
                 prev_context=prev_context,
+                is_engine_top=is_engine_top,
+                candidate_gap_cp=candidate_gap_cp,
             )
 
             # Check Miss (requires previous move context)
@@ -214,15 +267,18 @@ class ContextAssembler:
                 is_miss = detect_miss(
                     prev_context=prev_context, best_win_pct=best_win_pct,
                     played_win_pct=played_win_pct, ep_loss=ep_loss_val,
-                    elo=player_elo, config=self._config,
+                    side=side, elo=player_elo, config=self._config,
                 )
 
             # Override label for special classifications
+            # Priority: brilliant > great > miss > base label
+            # Miss overrides inaccuracy/mistake too — the "missed opportunity"
+            # context is more informative than the raw severity label.
             if is_brilliant:
                 label = "brilliant"
             elif is_great and label in ("best", "excellent", "good"):
                 label = "great"
-            elif is_miss and label in ("best", "excellent", "good"):
+            elif is_miss and label not in ("blunder",):
                 label = "miss"
 
         # Opening
@@ -252,6 +308,9 @@ class ContextAssembler:
             player_elo=player_elo,
             opponent_elo=opponent_elo,
             wdl_source=wdl_source,
+            is_engine_top_move=is_engine_top,
+            candidate_gap_cp=candidate_gap_cp,
+            candidate_gap_wp=candidate_gap_wp,
             is_brilliant=is_brilliant,
             is_great=is_great,
             is_miss=is_miss,

@@ -213,78 +213,81 @@ def _elo_thresholds(elo: Optional[int]) -> dict:
         }
 
 
+def _is_recapture(board: chess.Board, move: chess.Move) -> bool:
+    """
+    Check if a move is a recapture — capturing on the same square where the
+    opponent just captured. Recaptures are routine and should not qualify as "great".
+    """
+    if not board.is_capture(move):
+        return False
+    # Check if the opponent's last move was a capture on the same square
+    if len(board.move_stack) == 0:
+        return False
+    prev_move = board.move_stack[-1]
+    return prev_move.to_square == move.to_square
+
+
 def detect_great(
     ep_loss: float,
     win_pct_before: float,
     win_pct_after: float,
     candidates: list[CandidateMove],
     provider: WDLProvider,
+    board: Optional[chess.Board] = None,
+    move: Optional[chess.Move] = None,
     elo: Optional[int] = None,
     config: Optional[ClassificationConfig] = None,
     prev_context: Optional[AssembledContext] = None,
+    is_engine_top: bool = False,
+    candidate_gap_cp: Optional[int] = None,
 ) -> bool:
     """
     Returns True if the move qualifies as a Great Move (!).
 
-    Great = one of:
-      A. Capitalization: opponent's previous move was a mistake/blunder,
-         and the player found the best (or near-best) response to exploit it.
-         This is the most common "great" trigger on chess.com.
-      B. Turning move: position swings from losing to equal or better.
-      C. Seizing move: position swings from equal to winning.
-      D. Only move: single non-losing candidate, and the player found it.
+    Based on chess.com data analysis, "great" moves are characterized by:
+      - The played move is ALWAYS the engine's #1 choice
+      - The gap between the best and 2nd-best move is large (median ~269cp)
+      - The move is essentially the "only good move" in the position
+      - The move is NOT a recapture or forced/obvious response
+
+    Triggers (in priority order):
+      A. Candidate gap: engine's top move with a large gap to alternatives.
+         This is the primary trigger — chess.com great moves have 100% top-move
+         rate and huge candidate gaps.
+      B. Capitalization: opponent's previous move was a non-trivial mistake
+         and the player found the best response with a significant gap.
     """
     c = config or ClassificationConfig()
-    th = _elo_thresholds(elo)
 
-    # Must be the best or near-best move for any "great" classification
-    if ep_loss > c.great_ep_tolerance:
+    # Must be the engine's top choice (or very near-best) for any "great"
+    if not is_engine_top or ep_loss > c.great_ep_tolerance:
         return False
 
-    # A. Capitalization: opponent made a mistake and player punished it.
-    #    Only fires for moderate mistakes (not massive blunders where exploitation
-    #    is trivial). Exception: forced mate in the response is always "great".
-    if prev_context is not None:
+    # Filter: recaptures are routine — large candidate gap is just because
+    # not recapturing is terrible, not because the move is hard to find.
+    if board is not None and move is not None and _is_recapture(board, move):
+        return False
+
+    # Filter: in already heavily-won positions, finding the "best" move is
+    # less impressive — chess.com rarely awards "great" when WP > 0.90.
+    if win_pct_before > 0.90 or win_pct_before < 0.10:
+        return False
+
+    # A. Candidate gap: the played move is uniquely strong — all alternatives
+    #    are significantly worse. This is the primary "great" signal.
+    if candidate_gap_cp is not None and candidate_gap_cp >= c.great_min_candidate_gap_cp:
+        return True
+
+    # B. Capitalization with gap: opponent made a moderate mistake and the
+    #    player found the best response, but only if there's a meaningful gap
+    #    to alternatives (otherwise it's just a routine best move).
+    if prev_context is not None and candidate_gap_cp is not None:
         prev_ep_loss = prev_context.ep_loss
-        if prev_ep_loss is not None and prev_ep_loss >= c.great_capitalization_min_ep_loss:
-            has_mate_response = (
-                len(candidates) > 0
-                and candidates[0].mate_in is not None
-                and candidates[0].mate_in > 0
-            )
-            if has_mate_response or prev_ep_loss < c.great_capitalization_max_ep_loss:
-                return True
-
-    # B. Turning move: losing → equal or better
-    if (win_pct_before < th["losing"]
-            and win_pct_after >= th["equal_threshold"]):
-        return True
-
-    # C. Seizing move: equal → winning
-    if (th["equal_lower"] <= win_pct_before <= th["equal_upper"]
-            and win_pct_after > th["winning"]):
-        return True
-
-    # D. Only move: exactly one candidate within great_only_move_ep_gap of best
-    if len(candidates) >= 2:
-        best_wp = provider.get_win_pct(
-            cp=candidates[0].score_cp, mate_in=candidates[0].mate_in, elo=elo,
-            wdl_win=candidates[0].wdl_win, wdl_draw=candidates[0].wdl_draw,
-            wdl_loss=candidates[0].wdl_loss,
-        )
-        if best_wp is not None:
-            close_count = 0
-            for cand in candidates:
-                cand_wp = provider.get_win_pct(
-                    cp=cand.score_cp, mate_in=cand.mate_in, elo=elo,
-                    wdl_win=cand.wdl_win, wdl_draw=cand.wdl_draw,
-                    wdl_loss=cand.wdl_loss,
-                )
-                if cand_wp is not None and (best_wp - cand_wp) <= c.great_only_move_ep_gap:
-                    close_count += 1
-            # Only one candidate is close to best → only move
-            if close_count == 1:
-                return True
+        if (prev_ep_loss is not None
+                and prev_ep_loss >= c.great_capitalization_min_ep_loss
+                and prev_ep_loss < c.great_capitalization_max_ep_loss
+                and candidate_gap_cp >= c.great_min_candidate_gap_cp // 2):
+            return True
 
     return False
 
@@ -294,34 +297,32 @@ def detect_miss(
     best_win_pct: float,
     played_win_pct: float,
     ep_loss: float,
+    side: Optional[chess.Color] = None,
     elo: Optional[int] = None,
     config: Optional[ClassificationConfig] = None,
 ) -> bool:
     """
     Returns True if the player missed capitalizing on opponent's mistake.
 
-    Miss = opponent's previous move was a mistake/blunder (EP loss >= 0.10),
-    the best reply would reach a winning position, and the player's actual
-    reply does not reach it. Does not override worse labels (inaccuracy+).
+    Miss = opponent's previous move was a mistake/blunder (EP loss >= threshold),
+    and the player's move loses significant expected points (ep_loss >= threshold).
+    The key idea: the opponent gave away advantage, and the player failed to
+    take it — like a "great" move that wasn't chosen.
+
+    Unlike inaccuracy/mistake/blunder, miss is contextual: the same EP loss
+    that would be an inaccuracy in a normal position becomes a miss when the
+    opponent just blundered.
     """
     c = config or ClassificationConfig()
-    th = _elo_thresholds(elo)
 
     # Condition 1: opponent's previous move was a mistake or blunder
     prev_ep_loss = prev_context.ep_loss
     if prev_ep_loss is None or prev_ep_loss < c.miss_opponent_ep_loss_threshold:
         return False
 
-    # Condition 2: best reply would reach a winning position
-    if best_win_pct < th["winning"]:
-        return False
-
-    # Condition 3: player's actual move does NOT reach a winning position
-    if played_win_pct >= th["winning"]:
-        return False
-
-    # Condition 4: the played move is not itself a blunder (label it blunder instead)
-    if ep_loss >= c.ep_mistake:
+    # Condition 2: player's move loses meaningful expected points
+    # (the ep_loss is already side-corrected, so this works for both colors)
+    if ep_loss < c.miss_min_ep_loss:
         return False
 
     return True
