@@ -7,7 +7,8 @@ Accepts an EngineResult + chess.Board, returns an AssembledContext containing:
   - tactical patterns detected
   - pawn structure summary
   - piece activity signals
-  - centipawn loss classification
+  - EP-based move classification (win probability change)
+  - special move flags (brilliant, great, miss)
   - threat narrative (for coaching prompts)
 """
 
@@ -19,9 +20,16 @@ from typing import Optional
 import chess
 
 from analysis.eco import ECOLookup
+from analysis.expected_points import (
+    StockfishNativeWDLProvider,
+    classify_ep_loss,
+    resolve_provider,
+)
 from analysis.patterns import detect_tactics
 from analysis.pawns import analyze_pawns
-from chess_engine.service import EngineResult
+from analysis.special_moves import detect_brilliant, detect_great, detect_miss
+from chess_engine.service import CandidateMove, EngineResult
+from config.classification import ClassificationConfig
 
 
 PIECE_NAMES = {
@@ -45,22 +53,40 @@ class AssembledContext:
     best_move_san: str
     best_move_cp: Optional[int]
     mate_in: Optional[int]
-    played_move_cp_loss: Optional[int]   # positive = worse for side to move
-    cp_loss_label: str                   # best / excellent / good / inaccuracy / mistake / blunder
+    played_move_cp_loss: Optional[int]   # positive = worse for side to move (raw cp, unchanged)
+    cp_loss_label: str                   # now EP-derived: best / excellent / good / inaccuracy / mistake / blunder
     pv_san: list[str]                    # principal variation in SAN notation
 
+    # Expected Points data
+    win_pct_before: Optional[float] = None   # win probability at best eval (0.0–1.0)
+    win_pct_after: Optional[float] = None    # win probability at played move eval (0.0–1.0)
+    ep_loss: Optional[float] = None          # win_pct_before - win_pct_after
+    player_elo: Optional[int] = None         # Elo used for curve adjustment
+    opponent_elo: Optional[int] = None       # stored for context
+    wdl_source: str = "sigmoid"              # "sigmoid" or "native"
+
+    # Candidate analysis
+    is_engine_top_move: bool = False         # played move == engine's #1 candidate
+    candidate_gap_cp: Optional[int] = None   # centipawn gap between 1st and 2nd best candidate
+    candidate_gap_wp: Optional[float] = None # win probability gap between 1st and 2nd best
+
+    # Special classification flags
+    is_brilliant: bool = False
+    is_great: bool = False
+    is_miss: bool = False
+
     # Opening
-    eco_code: Optional[str]
-    opening_name: Optional[str]
-    theory_deviation: bool
+    eco_code: Optional[str] = None
+    opening_name: Optional[str] = None
+    theory_deviation: bool = False
 
     # Tactics & structure
-    tactical_patterns: list[str]
-    pawn_structure: dict
-    piece_activity: dict
+    tactical_patterns: list[str] = field(default_factory=list)
+    pawn_structure: dict = field(default_factory=dict)
+    piece_activity: dict = field(default_factory=dict)
 
     # Coaching
-    threat_narrative: str
+    threat_narrative: str = ""
 
 
 # Large centipawn value used when converting mate-in-N to centipawns.
@@ -76,9 +102,8 @@ def _mate_to_cp(mate_in: Optional[int]) -> Optional[int]:
     return -_MATE_CP_BASE - mate_in * 10
 
 
-# Centipawn loss buckets — aligned with Lichess/chess.com thresholds
-# Lichess: inaccuracy 50+, mistake 100+, blunder 300+
-# We add finer "best/excellent/good" grades below 50cp
+# Legacy cp-loss classifier — kept for backward compatibility but no longer
+# used as the primary classification method. EP-based classification is primary.
 def _classify_cp_loss(cp_loss: Optional[int]) -> str:
     if cp_loss is None:
         return "unknown"
@@ -96,28 +121,165 @@ def _classify_cp_loss(cp_loss: Optional[int]) -> str:
 
 
 class ContextAssembler:
-    def __init__(self, eco_lookup: Optional[ECOLookup] = None):
+    def __init__(
+        self,
+        eco_lookup: Optional[ECOLookup] = None,
+        classification_config: Optional[ClassificationConfig] = None,
+    ):
         self._eco = eco_lookup or ECOLookup()
+        self._config = classification_config or ClassificationConfig()
 
     def assemble(
         self,
         board: chess.Board,
         engine_result: EngineResult,
         played_move: Optional[chess.Move] = None,
+        player_elo: Optional[int] = None,
+        opponent_elo: Optional[int] = None,
+        prev_context: Optional[AssembledContext] = None,
     ) -> AssembledContext:
         best = engine_result.best
         best_move_san = board.san(best.move)
         pv_san = self._pv_to_san(board, best.pv)
 
-        # Centipawn loss for the played move
+        # --- Raw centipawn loss ---
         cp_loss = None
         played_move_san = None
+        played_candidate = None
         if played_move is not None:
             played_move_san = board.san(played_move)
+            played_candidate = self._find_candidate(engine_result, played_move)
             played_cp = self._cp_for_move(engine_result, played_move)
             best_cp = best.score_cp if best.score_cp is not None else _mate_to_cp(best.mate_in)
             if played_cp is not None and best_cp is not None:
                 cp_loss = abs(best_cp - played_cp)
+
+        # --- Candidate analysis: is this the engine's top pick? ---
+        is_engine_top = False
+        candidate_gap_cp = None
+        candidate_gap_wp = None
+        if played_move is not None:
+            is_engine_top = (played_move == best.move)
+
+        # --- EP-based classification ---
+        provider = resolve_provider(engine_result, self._config, player_elo=player_elo)
+        wdl_source = "native" if isinstance(provider, StockfishNativeWDLProvider) else "sigmoid"
+
+        best_win_pct = provider.get_win_pct(
+            cp=best.score_cp, mate_in=best.mate_in, elo=player_elo,
+            wdl_win=best.wdl_win, wdl_draw=best.wdl_draw, wdl_loss=best.wdl_loss,
+        )
+
+        played_win_pct = None
+        if played_candidate is not None:
+            played_win_pct = provider.get_win_pct(
+                cp=played_candidate.score_cp, mate_in=played_candidate.mate_in,
+                elo=player_elo,
+                wdl_win=played_candidate.wdl_win, wdl_draw=played_candidate.wdl_draw,
+                wdl_loss=played_candidate.wdl_loss,
+            )
+
+        # Candidate gap: how much better is the best move than the 2nd best?
+        # This measures move uniqueness — large gap means this was the "only good move".
+        if len(engine_result.candidates) >= 2:
+            second = engine_result.candidates[1]
+            second_cp = second.score_cp if second.score_cp is not None else _mate_to_cp(second.mate_in)
+            best_cp_raw = best.score_cp if best.score_cp is not None else _mate_to_cp(best.mate_in)
+            if best_cp_raw is not None and second_cp is not None:
+                candidate_gap_cp = abs(best_cp_raw - second_cp)
+
+            second_wp = provider.get_win_pct(
+                cp=second.score_cp, mate_in=second.mate_in, elo=player_elo,
+                wdl_win=second.wdl_win, wdl_draw=second.wdl_draw,
+                wdl_loss=second.wdl_loss,
+            )
+            if best_win_pct is not None and second_wp is not None:
+                if board.turn == chess.WHITE:
+                    candidate_gap_wp = max(0.0, best_win_pct - second_wp)
+                else:
+                    candidate_gap_wp = max(0.0, second_wp - best_win_pct)
+
+        ep_loss_val = None
+        if best_win_pct is not None and played_win_pct is not None:
+            if board.turn == chess.WHITE:
+                ep_loss_val = max(0.0, best_win_pct - played_win_pct)
+            else:
+                ep_loss_val = max(0.0, played_win_pct - best_win_pct)
+
+        # --- Base classification ---
+        # Step 1: classify by EP loss thresholds
+        # At low Elo, tighten the "excellent" threshold — the sigmoid curve
+        # is flatter so small EP losses are less meaningful. Chess.com uses
+        # a higher bar for "excellent" at lower Elo.
+        effective_config = self._config
+        if player_elo is not None and player_elo < self._config.excellent_elo_threshold:
+            from dataclasses import replace as _replace
+            effective_config = _replace(
+                self._config,
+                ep_excellent=self._config.ep_excellent_low_elo,
+            )
+        label = classify_ep_loss(ep_loss_val, effective_config)
+
+        # Step 2: if the played move is the engine's exact top choice AND
+        # there's a meaningful gap to alternatives, promote to "best".
+        # When multiple moves are nearly equal (small candidate gap),
+        # being engine #1 is noise — leave as "excellent".
+        if is_engine_top and label in ("best", "excellent"):
+            min_gap = self._config.best_promotion_min_gap_cp
+            if candidate_gap_cp is not None and candidate_gap_cp >= min_gap:
+                label = "best"
+            elif candidate_gap_cp is None:
+                # No candidate gap info (single-PV analysis) — promote anyway
+                label = "best"
+
+        # --- Special classification checks ---
+        is_brilliant = False
+        is_great = False
+        is_miss = False
+
+        if played_move is not None and ep_loss_val is not None and best_win_pct is not None and played_win_pct is not None:
+            side = board.turn
+
+            # Check Brilliant (sacrifice-based, unchanged)
+            board_after = board.copy()
+            board_after.push(played_move)
+            is_brilliant = detect_brilliant(
+                board_before=board, board_after=board_after, move=played_move,
+                ep_loss=ep_loss_val, win_pct_before=best_win_pct,
+                win_pct_after=played_win_pct, best_pv=best.pv, best_mate_in=best.mate_in,
+                side=side, elo=player_elo, config=self._config,
+            )
+
+            # Check Great Move — driven by candidate gap + filters
+            is_great = detect_great(
+                ep_loss=ep_loss_val, win_pct_before=best_win_pct,
+                win_pct_after=played_win_pct,
+                candidates=engine_result.candidates,
+                provider=provider, board=board, move=played_move,
+                elo=player_elo, config=self._config,
+                prev_context=prev_context,
+                is_engine_top=is_engine_top,
+                candidate_gap_cp=candidate_gap_cp,
+            )
+
+            # Check Miss (requires previous move context)
+            if prev_context is not None:
+                is_miss = detect_miss(
+                    prev_context=prev_context, best_win_pct=best_win_pct,
+                    played_win_pct=played_win_pct, ep_loss=ep_loss_val,
+                    side=side, elo=player_elo, config=self._config,
+                )
+
+            # Override label for special classifications
+            # Priority: brilliant > great > miss > base label
+            # Miss overrides inaccuracy/mistake too — the "missed opportunity"
+            # context is more informative than the raw severity label.
+            if is_brilliant:
+                label = "brilliant"
+            elif is_great and label in ("best", "excellent", "good"):
+                label = "great"
+            elif is_miss and label not in ("blunder",):
+                label = "miss"
 
         # Opening
         eco_code, opening_name = self._eco.lookup(board)
@@ -138,8 +300,20 @@ class ContextAssembler:
             best_move_cp=best.score_cp,
             mate_in=best.mate_in,
             played_move_cp_loss=cp_loss,
-            cp_loss_label=_classify_cp_loss(cp_loss),
+            cp_loss_label=label,
             pv_san=pv_san,
+            win_pct_before=best_win_pct,
+            win_pct_after=played_win_pct,
+            ep_loss=ep_loss_val,
+            player_elo=player_elo,
+            opponent_elo=opponent_elo,
+            wdl_source=wdl_source,
+            is_engine_top_move=is_engine_top,
+            candidate_gap_cp=candidate_gap_cp,
+            candidate_gap_wp=candidate_gap_wp,
+            is_brilliant=is_brilliant,
+            is_great=is_great,
+            is_miss=is_miss,
             eco_code=eco_code,
             opening_name=opening_name,
             theory_deviation=theory_deviation,
@@ -148,6 +322,13 @@ class ContextAssembler:
             piece_activity=piece_activity,
             threat_narrative=threat_narrative,
         )
+
+    def _find_candidate(self, result: EngineResult, move: chess.Move) -> Optional[CandidateMove]:
+        """Find the CandidateMove entry for the played move."""
+        for candidate in result.candidates:
+            if candidate.move == move:
+                return candidate
+        return None
 
     def _cp_for_move(self, result: EngineResult, move: chess.Move) -> Optional[int]:
         for candidate in result.candidates:
@@ -228,14 +409,6 @@ class ContextAssembler:
                     rooks_on_open.append(chess.square_name(rook_sq))
             result[f"{color_name}_rooks_open_files"] = rooks_on_open
 
-            # Knight outposts: knights on ranks 4-6 (for white) or 3-5 (for black)
-            # supported by own pawn and not attackable by enemy pawns
-            # Pseudocode for full implementation:
-            #   for each knight:
-            #     1. Check if knight is on an advanced rank (4-6 for white, 3-5 for black)
-            #     2. Check if knight is supported by a friendly pawn
-            #     3. Check that no enemy pawn on adjacent files can advance to attack it
-            #     4. If all conditions met → outpost
             knights = board.pieces(chess.KNIGHT, color)
             outposts = []
             for knight_sq in knights:
@@ -246,13 +419,6 @@ class ContextAssembler:
                     outposts.append(chess.square_name(knight_sq))
             result[f"{color_name}_knight_outposts"] = outposts
 
-            # King safety: count attackers near the king
-            # Pseudocode for full implementation:
-            #   1. Get the king's square and its surrounding squares (king zone)
-            #   2. Count how many enemy pieces attack squares in the king zone
-            #   3. Weight by piece type (queen attack = 4, rook = 2, bishop/knight = 1)
-            #   4. Subtract defenders in the king zone
-            #   5. Higher score = less safe
             king_sq = board.king(color)
             if king_sq is not None:
                 enemy = not color

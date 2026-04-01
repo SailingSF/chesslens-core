@@ -28,6 +28,10 @@ class CandidateMove:
     score_cp: Optional[int]        # centipawns (None if mate)
     mate_in: Optional[int]         # moves to mate (None if not mate)
     pv: list[chess.Move] = field(default_factory=list)
+    # Native WDL from Stockfish 16+ (optional, permille 0–1000)
+    wdl_win: Optional[int] = None
+    wdl_draw: Optional[int] = None
+    wdl_loss: Optional[int] = None
 
 
 @dataclass
@@ -164,6 +168,9 @@ class RemoteEngineService(EngineService):
                 score_cp=c.get("score_cp"),
                 mate_in=c.get("mate_in"),
                 pv=pv,
+                wdl_win=c.get("wdl_win"),
+                wdl_draw=c.get("wdl_draw"),
+                wdl_loss=c.get("wdl_loss"),
             ))
 
         return EngineResult(fen=fen, depth=depth, candidates=candidates)
@@ -186,8 +193,22 @@ def _parse_candidates(info_list: list) -> list[CandidateMove]:
                 mate_in = pov.mate()
             else:
                 score_cp = pov.score()
+
+        # Parse native WDL from Stockfish 16+ (UCI_ShowWDL)
+        # python-chess exposes this as a PovWdl in info["wdl"]
+        wdl_win = None
+        wdl_draw = None
+        wdl_loss = None
+        wdl = info.get("wdl")
+        if wdl is not None:
+            pov_wdl = wdl.white()
+            wdl_win = pov_wdl.wins
+            wdl_draw = pov_wdl.draws
+            wdl_loss = pov_wdl.losses
+
         candidates.append(CandidateMove(
-            move=move, score_cp=score_cp, mate_in=mate_in, pv=pv
+            move=move, score_cp=score_cp, mate_in=mate_in, pv=pv,
+            wdl_win=wdl_win, wdl_draw=wdl_draw, wdl_loss=wdl_loss,
         ))
     return candidates
 
