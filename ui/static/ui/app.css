@@ -1,35 +1,130 @@
-/* ChessLens UI — minimal overrides on top of Pico CSS */
+/* ChessLens UI — overrides on top of Pico CSS */
 
-/* Board wrapper — give chessboard.js a concrete width */
+/* ============================================================
+   Design tokens
+   ============================================================ */
+:root {
+    --cl-board-light: #e8d4a8;
+    --cl-board-dark:  #a07848;
+    --cl-board-border: #7a5c30;
+
+    --cl-bg-card:    #1e2029;
+    --cl-bg-surface: #252830;
+    --cl-bg-hover:   rgba(255,255,255,0.05);
+    --cl-bg-selected: rgba(93,156,230,0.18);
+
+    --cl-border:        rgba(255,255,255,0.08);
+    --cl-border-strong: rgba(255,255,255,0.16);
+
+    --cl-accent:     #5d9ce6;
+    --cl-accent-dim: rgba(93,156,230,0.14);
+
+    --cl-text:       #e4e8f0;
+    --cl-text-muted: #7c8698;
+
+    /* Move quality palette */
+    --cl-best:        #3ecf74;
+    --cl-excellent:   #2ec98a;
+    --cl-good:        #8fcc2e;
+    --cl-inaccuracy:  #f5ca35;
+    --cl-mistake:     #f07840;
+    --cl-blunder:     #ef4444;
+    --cl-forced:      #5a6075;
+    --cl-book:        #7b82d4;
+
+    --cl-shadow-sm: 0 1px 4px rgba(0,0,0,0.35);
+    --cl-shadow:    0 2px 12px rgba(0,0,0,0.4);
+    --cl-radius:    6px;
+}
+
+/* ============================================================
+   Board square colour overrides (chessboard.js 1.0.0)
+   ============================================================ */
+.white-1e1d7 { background-color: var(--cl-board-light) !important; }
+.black-3c85d { background-color: var(--cl-board-dark)  !important; }
+
+/* ============================================================
+   Board wrapper
+   ============================================================ */
 #board-wrapper {
     width: 400px;
     max-width: 100%;
+    border-radius: var(--cl-radius);
+    overflow: hidden;
+    box-shadow: var(--cl-shadow);
+    border: 2px solid var(--cl-board-border);
 }
 
+/* Remove double border from chessboard.js itself */
 #board .board-b72b1 {
-    border: 2px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
+    border: none !important;
+    border-radius: 0;
 }
 
-#result-card blockquote {
+/* ============================================================
+   Input card
+   ============================================================ */
+.input-card {
+    background: var(--cl-bg-card);
+    border: 1px solid var(--cl-border-strong);
+    border-radius: var(--cl-radius);
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: var(--cl-shadow-sm);
+}
+
+.input-card textarea {
+    font-family: monospace;
+    font-size: 0.85em;
+    resize: vertical;
+    background: var(--cl-bg-surface);
+    border-color: var(--cl-border-strong);
+    color: var(--cl-text);
+}
+
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 1rem;
+    align-items: end;
     margin-top: 1rem;
-    font-style: italic;
 }
 
-footer {
-    margin-top: 3rem;
-    text-align: center;
-    opacity: 0.7;
+@media (max-width: 600px) {
+    .form-row { grid-template-columns: 1fr; }
 }
 
-/* --- Eval Graph --- */
+.form-group { display: flex; flex-direction: column; gap: 0.25rem; }
+.form-group label { margin-bottom: 0; font-size: 0.88em; color: var(--cl-text-muted); }
 
+#analyze-btn {
+    background: var(--cl-accent);
+    border-color: var(--cl-accent);
+    color: #fff;
+    font-weight: 600;
+    white-space: nowrap;
+    padding: 0.55rem 1.5rem;
+    border-radius: var(--cl-radius);
+    width: 100%;
+}
+#analyze-btn:hover { filter: brightness(1.12); }
+#analyze-btn:disabled { opacity: 0.55; }
+
+.review-hero { margin-bottom: 1rem; }
+.review-hero h2 { margin-bottom: 0.2rem; }
+.review-hero p  { color: var(--cl-text-muted); margin: 0; }
+
+/* ============================================================
+   Eval graph
+   ============================================================ */
 #eval-graph-container {
     margin-bottom: 1rem;
-    border: 1px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
+    border: 1px solid var(--cl-border-strong);
+    border-radius: var(--cl-radius);
     overflow: hidden;
     cursor: pointer;
+    background: #181a20;
+    box-shadow: var(--cl-shadow-sm);
 }
 
 #eval-graph {
@@ -37,8 +132,9 @@ footer {
     width: 100%;
 }
 
-/* --- Game Review Layout --- */
-
+/* ============================================================
+   Two-column analysis layout
+   ============================================================ */
 .analysis-layout {
     display: grid;
     grid-template-columns: minmax(300px, 420px) 1fr;
@@ -47,66 +143,122 @@ footer {
 }
 
 @media (max-width: 768px) {
-    .analysis-layout {
-        grid-template-columns: 1fr;
-    }
+    .analysis-layout { grid-template-columns: 1fr; }
 }
 
-/* Board controls */
+/* ============================================================
+   Board controls
+   ============================================================ */
 #board-controls {
     display: flex;
-    gap: 0.4rem;
+    gap: 0.35rem;
     justify-content: center;
-    margin: 0.5rem 0;
+    margin: 0.6rem 0 0.4rem 0;
 }
 
-#board-controls button {
-    padding: 0.3rem 0.7rem;
-    font-size: 1.1rem;
-    min-width: 2.2rem;
+.ctrl-btn {
+    padding: 0.3rem 0.65rem;
+    font-size: 1.05rem;
+    min-width: 2.4rem;
+    background: var(--cl-bg-surface);
+    border: 1px solid var(--cl-border-strong);
+    border-radius: var(--cl-radius);
+    color: var(--cl-text);
+    cursor: pointer;
+    transition: background 0.12s;
 }
+.ctrl-btn:hover { background: var(--cl-bg-hover); border-color: var(--cl-accent); }
+.flip-btn { margin-left: 0.4rem; }
 
-/* Explanation panel */
+/* ============================================================
+   Explanation panel
+   ============================================================ */
 #explanation-panel {
-    margin-top: 0.75rem;
-    padding: 0.75rem 1rem;
-    border: 1px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
-    min-height: 4rem;
-    background: var(--pico-card-background-color);
+    margin-top: 0.5rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--cl-border-strong);
+    border-radius: var(--cl-radius);
+    min-height: 5rem;
+    background: var(--cl-bg-card);
+    box-shadow: var(--cl-shadow-sm);
+    transition: border-left-color 0.2s;
+    border-left: 4px solid var(--cl-border-strong);
 }
+
+/* Quality-coloured left border */
+#explanation-panel.quality-best        { border-left-color: var(--cl-best);       }
+#explanation-panel.quality-excellent   { border-left-color: var(--cl-excellent);  }
+#explanation-panel.quality-good        { border-left-color: var(--cl-good);       }
+#explanation-panel.quality-inaccuracy  { border-left-color: var(--cl-inaccuracy); }
+#explanation-panel.quality-mistake     { border-left-color: var(--cl-mistake);    }
+#explanation-panel.quality-blunder     { border-left-color: var(--cl-blunder);    }
+#explanation-panel.quality-book        { border-left-color: var(--cl-book);       }
+#explanation-panel.quality-forced      { border-left-color: var(--cl-forced);     }
 
 .explanation-header {
-    margin-bottom: 0.4rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.explanation-move-label {
+    font-size: 1.05em;
+    font-weight: 700;
+    color: var(--cl-text);
 }
 
 .explanation-text {
-    margin: 0;
-    line-height: 1.5;
+    color: var(--cl-text);
+    line-height: 1.6;
+    font-size: 0.95em;
 }
+
+.explanation-text p      { margin: 0 0 0.35rem 0; }
+.explanation-text p:last-child { margin-bottom: 0; }
 
 .cp-value {
-    opacity: 0.6;
-    font-size: 0.85em;
+    opacity: 0.55;
+    font-size: 0.82em;
+    font-family: monospace;
 }
 
-/* Move list */
-#moves-col {
-    min-width: 0;
+.muted { color: var(--cl-text-muted); }
+
+/* ============================================================
+   Move list
+   ============================================================ */
+#moves-col { min-width: 0; }
+
+#move-list-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.35rem;
+}
+
+.col-label {
+    font-size: 0.8em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--cl-text-muted);
 }
 
 #move-list {
     max-height: 480px;
     overflow-y: auto;
-    border: 1px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
-    padding: 0.25rem;
-    background: var(--pico-card-background-color);
+    border: 1px solid var(--cl-border-strong);
+    border-radius: var(--cl-radius);
+    padding: 0.3rem 0.25rem;
+    background: var(--cl-bg-card);
+    box-shadow: var(--cl-shadow-sm);
 }
 
 .move-row {
     display: flex;
-    gap: 0.25rem;
+    gap: 0.15rem;
     padding: 1px 0;
     align-items: center;
 }
@@ -114,127 +266,186 @@ footer {
 .move-num {
     width: 2.2rem;
     text-align: right;
-    opacity: 0.5;
-    font-size: 0.85em;
+    opacity: 0.4;
+    font-size: 0.82em;
     flex-shrink: 0;
-    padding-right: 0.25rem;
+    padding-right: 0.3rem;
 }
 
 .move-cell {
     flex: 1;
-    padding: 3px 6px;
-    border-radius: 3px;
+    padding: 4px 6px;
+    border-radius: 4px;
     cursor: pointer;
     display: flex;
     align-items: center;
     gap: 0.3rem;
     min-width: 0;
+    transition: background 0.1s;
+    position: relative;
 }
+.move-cell:hover    { background: var(--cl-bg-hover); }
+.move-cell.selected { background: var(--cl-bg-selected); }
 
-.move-cell:hover {
-    background: var(--pico-secondary-hover);
+/* Quality accent dot on move cell */
+.move-cell[data-quality]::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: transparent;
 }
+.move-cell[data-quality="best"]::before        { background: var(--cl-best);       }
+.move-cell[data-quality="excellent"]::before   { background: var(--cl-excellent);  }
+.move-cell[data-quality="good"]::before        { background: var(--cl-good);       }
+.move-cell[data-quality="inaccuracy"]::before  { background: var(--cl-inaccuracy); }
+.move-cell[data-quality="mistake"]::before     { background: var(--cl-mistake);    }
+.move-cell[data-quality="blunder"]::before     { background: var(--cl-blunder);    }
+.move-cell[data-quality="book"]::before        { background: var(--cl-book);       }
 
-.move-cell.selected {
-    background: var(--pico-primary-focus);
-}
+.move-san { font-weight: 600; font-size: 0.95em; }
 
-.move-san {
-    font-weight: 600;
-}
-
-/* Assessment badges */
+/* ============================================================
+   Assessment badges
+   ============================================================ */
 .badge {
-    font-size: 0.7em;
+    font-size: 0.68em;
     padding: 1px 5px;
     border-radius: 3px;
     white-space: nowrap;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
 }
 
-.badge-best {
-    background: #27ae60;
-    color: #fff;
-}
+.badge-best        { background: var(--cl-best);       color: #000; }
+.badge-excellent   { background: var(--cl-excellent);  color: #000; }
+.badge-good        { background: var(--cl-good);        color: #000; }
+.badge-inaccuracy  { background: var(--cl-inaccuracy);  color: #000; }
+.badge-mistake     { background: var(--cl-mistake);     color: #fff; }
+.badge-blunder     { background: var(--cl-blunder);     color: #fff; }
+.badge-unknown     { background: #4a5060;               color: #aaa; }
+.badge-book        { background: var(--cl-book);        color: #fff; }
+.badge-forced      { background: var(--cl-forced);      color: #9ba3b8; }
 
-.badge-excellent {
-    background: #2ecc71;
-    color: #000;
-}
-
-.badge-good {
-    background: #82c91e;
-    color: #000;
-}
-
-.badge-inaccuracy {
-    background: #f1c40f;
-    color: #000;
-}
-
-.badge-mistake {
-    background: #e67e22;
-    color: #fff;
-}
-
-.badge-blunder {
-    background: #e74c3c;
-    color: #fff;
-}
-
-.badge-unknown {
-    background: #7f8c8d;
-    color: #fff;
-}
-
-.badge-book {
-    background: #5b6abf;
-    color: #fff;
-}
-
-.badge-forced {
-    background: #555;
-    color: #aaa;
-}
-
+/* ============================================================
+   Analysis status
+   ============================================================ */
 #analysis-status {
-    margin-top: 0.5rem;
-    text-align: center;
+    font-size: 0.8em;
+    color: var(--cl-text-muted);
 }
 
-/* --- Game Summary --- */
+.status-streaming {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
 
+.status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--cl-accent);
+    animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.4; transform: scale(0.75); }
+}
+
+/* ============================================================
+   Game Summary — highlighted hero card
+   ============================================================ */
 #game-summary {
-    margin-top: 1.5rem;
-    padding: 1rem 1.25rem;
-    border: 1px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
-    background: var(--pico-card-background-color);
+    margin-top: 2rem;
+    border-radius: var(--cl-radius);
+    border: 1px solid rgba(93,156,230,0.3);
+    background: linear-gradient(135deg, #1e2540 0%, #1a2035 100%);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06);
+    overflow: hidden;
 }
 
-#game-summary h3 {
-    margin-top: 0;
-    margin-bottom: 0.5rem;
+.summary-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem 1rem 1.5rem;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
 }
 
-#summary-text p {
-    line-height: 1.6;
+.summary-icon {
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 50%;
+    background: var(--cl-accent);
+    color: #fff;
+    font-size: 1.2rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    box-shadow: 0 0 14px rgba(93,156,230,0.4);
 }
 
-/* --- Markdown in explanations --- */
-
-.explanation-text p {
-    margin: 0 0 0.3rem 0;
+.summary-title {
+    margin: 0 0 0.4rem 0;
+    font-size: 1.1em;
+    font-weight: 700;
+    color: var(--cl-text);
 }
 
-.explanation-text p:last-child {
-    margin-bottom: 0;
+.move-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.2rem;
 }
 
-/* --- Position Explorer Layout --- */
+.stat-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.78em;
+    font-weight: 600;
+}
 
+.stat-pill .stat-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+}
+
+.stat-best        .stat-dot { background: var(--cl-best);       }
+.stat-excellent   .stat-dot { background: var(--cl-excellent);  }
+.stat-good        .stat-dot { background: var(--cl-good);        }
+.stat-inaccuracy  .stat-dot { background: var(--cl-inaccuracy);  }
+.stat-mistake     .stat-dot { background: var(--cl-mistake);     }
+.stat-blunder     .stat-dot { background: var(--cl-blunder);     }
+
+.stat-best, .stat-excellent, .stat-good { background: rgba(255,255,255,0.07); }
+.stat-inaccuracy { background: rgba(245,202,53,0.12); }
+.stat-mistake    { background: rgba(240,120,64,0.12); }
+.stat-blunder    { background: rgba(239,68,68,0.14); }
+
+#summary-text {
+    padding: 1rem 1.5rem 1.25rem 1.5rem;
+    line-height: 1.7;
+    color: var(--cl-text);
+    font-size: 0.97em;
+}
+
+#summary-text p { margin: 0 0 0.6rem 0; }
+#summary-text p:last-child { margin-bottom: 0; }
+
+/* ============================================================
+   Position Explorer Layout
+   ============================================================ */
 .explorer-layout {
     display: grid;
     grid-template-columns: minmax(300px, 420px) 1fr;
@@ -243,9 +454,7 @@ footer {
 }
 
 @media (max-width: 768px) {
-    .explorer-layout {
-        grid-template-columns: 1fr;
-    }
+    .explorer-layout { grid-template-columns: 1fr; }
 }
 
 #turn-select-row {
@@ -255,29 +464,16 @@ footer {
     margin: 0.5rem 0 1rem 0;
 }
 
-#turn-select-row label {
-    margin: 0;
-    white-space: nowrap;
-    font-size: 0.9em;
-}
+#turn-select-row label   { margin: 0; white-space: nowrap; font-size: 0.9em; }
+#turn-select-row fieldset { margin: 0; }
 
-#turn-select-row fieldset {
-    margin: 0;
-}
-
-.turn-btn {
-    padding: 0.3rem 0.8rem !important;
-    font-size: 0.85em !important;
-    margin: 0 !important;
-}
-
+.turn-btn { padding: 0.3rem 0.8rem !important; font-size: 0.85em !important; margin: 0 !important; }
 .turn-btn.active {
     background: var(--pico-primary-background) !important;
     color: var(--pico-primary-inverse) !important;
 }
 
 /* Candidate moves */
-
 .candidate-row {
     display: grid;
     grid-template-columns: 1.5rem 3.5rem 4rem 1fr;
@@ -286,50 +482,21 @@ footer {
     padding: 0.5rem 0.6rem;
     border-bottom: 1px solid var(--pico-muted-border-color);
 }
+.candidate-row:last-child { border-bottom: none; }
+.candidate-rank  { font-weight: 700; opacity: 0.5; font-size: 0.85em; text-align: center; }
+.candidate-move  { font-weight: 700; font-size: 1.05em; }
+.candidate-eval  { font-family: monospace; font-size: 0.9em; padding: 2px 6px; border-radius: 3px; text-align: center; }
+.eval-winning    { background: #27ae60; color: #fff; }
+.eval-losing     { background: #e74c3c; color: #fff; }
+.eval-equal      { background: #7f8c8d; color: #fff; }
+.candidate-pv    { font-size: 0.82em; opacity: 0.65; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.candidate-row:last-child {
-    border-bottom: none;
-}
+/* ============================================================
+   Result card (index page)
+   ============================================================ */
+#result-card blockquote { margin-top: 1rem; font-style: italic; }
 
-.candidate-rank {
-    font-weight: 700;
-    opacity: 0.5;
-    font-size: 0.85em;
-    text-align: center;
-}
-
-.candidate-move {
-    font-weight: 700;
-    font-size: 1.05em;
-}
-
-.candidate-eval {
-    font-family: monospace;
-    font-size: 0.9em;
-    padding: 2px 6px;
-    border-radius: 3px;
-    text-align: center;
-}
-
-.eval-winning {
-    background: #27ae60;
-    color: #fff;
-}
-
-.eval-losing {
-    background: #e74c3c;
-    color: #fff;
-}
-
-.eval-equal {
-    background: #7f8c8d;
-    color: #fff;
-}
-
-.candidate-pv {
-    font-size: 0.82em;
-    opacity: 0.65;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
+/* ============================================================
+   Footer
+   ============================================================ */
+footer { margin-top: 3rem; text-align: center; opacity: 0.7; }
