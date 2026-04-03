@@ -58,9 +58,16 @@ class EngineService:
         fen: str,
         *,
         depth: int = 20,
+        nodes: Optional[int] = None,
         multipv: int = 3,
         uci_options: Optional[dict] = None,
     ) -> EngineResult:
+        """
+        Analyze a position.
+
+        If nodes is set, uses node-based search (chess.com style) instead of
+        depth-based search. When nodes is set, depth is ignored.
+        """
         raise NotImplementedError
 
     async def shutdown(self) -> None:
@@ -90,12 +97,19 @@ class PooledEngineService(EngineService):
         fen: str,
         *,
         depth: int = 20,
+        nodes: Optional[int] = None,
         multipv: int = 3,
         uci_options: Optional[dict] = None,
     ) -> EngineResult:
         await self._ensure_started()
 
         board = chess.Board(fen)
+
+        # Node-based search (chess.com style) takes priority over depth
+        if nodes is not None:
+            limit = chess.engine.Limit(nodes=nodes)
+        else:
+            limit = chess.engine.Limit(depth=depth)
 
         async with self._pool.acquire() as engine:
             # Apply per-request UCI options (e.g. UCI_LimitStrength, UCI_Elo)
@@ -104,7 +118,7 @@ class PooledEngineService(EngineService):
 
             info_list = await engine.analyse(
                 board,
-                chess.engine.Limit(depth=depth),
+                limit,
                 multipv=multipv,
             )
 
@@ -117,7 +131,11 @@ class PooledEngineService(EngineService):
             info_list = [info_list]
 
         candidates = _parse_candidates(info_list)
-        return EngineResult(fen=fen, depth=depth, candidates=candidates)
+        # Report the depth actually reached (from engine info if available)
+        reached_depth = depth
+        if info_list and "depth" in info_list[0]:
+            reached_depth = info_list[0]["depth"]
+        return EngineResult(fen=fen, depth=reached_depth, candidates=candidates)
 
     async def shutdown(self) -> None:
         if self._started:
@@ -141,6 +159,7 @@ class RemoteEngineService(EngineService):
         fen: str,
         *,
         depth: int = 20,
+        nodes: Optional[int] = None,
         multipv: int = 3,
         uci_options: Optional[dict] = None,
     ) -> EngineResult:
@@ -152,6 +171,8 @@ class RemoteEngineService(EngineService):
             "multipv": multipv,
             "uci_options": uci_options or {},
         }
+        if nodes is not None:
+            payload["nodes"] = nodes
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{self._engine_url}/analyze", json=payload)
