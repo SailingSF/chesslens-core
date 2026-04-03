@@ -156,22 +156,34 @@ def _game_elos_by_side(csv_path: Path, fallback_elo: int = 820) -> tuple[int, in
     return fallback_elo, fallback_elo
 
 
-def _cache_path(csv_path: Path, depth: int, multipv: int, engine_tag: str = "sf18") -> Path:
+def _cache_path(
+    csv_path: Path, depth: int, multipv: int,
+    engine_tag: str = "sf18", nodes: int | None = None,
+) -> Path:
     """
     Return the JSON cache file path for a given game + analysis params.
 
     Includes engine version tag so caches from different Stockfish versions
-    are kept separate. e.g. game_01_sf16.1_d20_pv3.json
+    are kept separate.
+
+    Node-based:  game_01_sf16.1_n2000000_pv3.json
+    Depth-based: game_01_sf16.1_d20_pv3.json
 
     Falls back to legacy format (no engine tag) for backward compatibility.
     """
-    versioned = csv_path.parent / f"{csv_path.stem}_{engine_tag}_d{depth}_pv{multipv}.json"
+    if nodes is not None:
+        search_tag = f"n{nodes}"
+    else:
+        search_tag = f"d{depth}"
+
+    versioned = csv_path.parent / f"{csv_path.stem}_{engine_tag}_{search_tag}_pv{multipv}.json"
     if versioned.exists():
         return versioned
-    # Legacy fallback: game_01_stockfish_d20_pv3.json
-    legacy = csv_path.parent / f"{csv_path.stem}_stockfish_d{depth}_pv{multipv}.json"
-    if legacy.exists():
-        return legacy
+    # Legacy fallback (depth-based only): game_01_stockfish_d20_pv3.json
+    if nodes is None:
+        legacy = csv_path.parent / f"{csv_path.stem}_stockfish_d{depth}_pv{multipv}.json"
+        if legacy.exists():
+            return legacy
     # Return versioned path for new cache creation
     return versioned
 
@@ -183,6 +195,7 @@ def _cache_path(csv_path: Path, depth: int, multipv: int, engine_tag: str = "sf1
 async def generate_stockfish_cache(
     csv_path: Path,
     depth: int = 20,
+    nodes: int | None = None,
     multipv: int = 3,
     hash_mb: int = 128,
     threads: int = 2,
@@ -197,6 +210,10 @@ async def generate_stockfish_cache(
       2. If played move isn't among them, run constrained analysis for it
       3. Save all engine results to JSON
 
+    If nodes is set, uses node-based search (chess.com style) instead of
+    depth-based search. Node-based search typically reaches depth 18-22
+    depending on position complexity.
+
     Returns the cache file path.
     """
     import chess
@@ -204,7 +221,15 @@ async def generate_stockfish_cache(
     from chess_engine.service import _parse_candidates
 
     moves = load_chesscom_csv(csv_path)
-    cache_file = _cache_path(csv_path, depth, multipv, engine_tag)
+    cache_file = _cache_path(csv_path, depth, multipv, engine_tag, nodes=nodes)
+
+    # Build the search limit
+    if nodes is not None:
+        limit = chess.engine.Limit(nodes=nodes)
+        search_desc = f"nodes={nodes:,}"
+    else:
+        limit = chess.engine.Limit(depth=depth)
+        search_desc = f"depth={depth}"
 
     pool = EnginePool(engine_path=engine_path, size=1, hash_mb=hash_mb, threads=threads)
     await pool.start()
@@ -233,7 +258,7 @@ async def generate_stockfish_cache(
                 await engine.configure({"UCI_ShowWDL": True})
                 info_list = await engine.analyse(
                     board,
-                    chess.engine.Limit(depth=depth),
+                    limit,
                     multipv=multipv,
                 )
                 if not isinstance(info_list, list):
@@ -247,7 +272,7 @@ async def generate_stockfish_cache(
                 if not played_in_candidates:
                     played_info = await engine.analyse(
                         board,
-                        chess.engine.Limit(depth=depth),
+                        limit,
                         root_moves=[played_move],
                     )
                     if not isinstance(played_info, list):
@@ -255,12 +280,19 @@ async def generate_stockfish_cache(
                     played_candidates = _parse_candidates(played_info)
                     candidates.extend(played_candidates)
 
+            # Get the depth actually reached (from the first candidate's info)
+            reached_depth = depth
+            if info_list and "depth" in info_list[0]:
+                reached_depth = info_list[0]["depth"]
+
             # Serialize
             entry = {
                 "fen": board.fen(),
-                "depth": depth,
+                "depth": reached_depth,
                 "candidates": [],
             }
+            if nodes is not None:
+                entry["nodes"] = nodes
             for c in candidates:
                 entry["candidates"].append({
                     "move": c.move.uci(),
@@ -275,7 +307,8 @@ async def generate_stockfish_cache(
 
             best_cp = candidates[0].score_cp if candidates else None
             best_str = f"cp={best_cp}" if best_cp is not None else f"mate={candidates[0].mate_in}"
-            print(f" {best_str}")
+            depth_str = f" d={reached_depth}" if nodes is not None else ""
+            print(f" {best_str}{depth_str}")
 
             board.push(played_move)
     finally:
@@ -291,6 +324,7 @@ async def generate_stockfish_cache(
 async def generate_all_caches(
     game_files: list[Path],
     depth: int = 20,
+    nodes: int | None = None,
     multipv: int = 3,
     hash_mb: int = 128,
     threads: int = 2,
@@ -299,17 +333,22 @@ async def generate_all_caches(
     engine_tag: str = "sf18",
 ) -> list[Path]:
     """Generate Stockfish caches for all game files."""
+    if nodes is not None:
+        search_desc = f"nodes={nodes:,}"
+    else:
+        search_desc = f"depth={depth}"
+
     generated = []
     for csv_path in game_files:
-        cache = _cache_path(csv_path, depth, multipv, engine_tag)
+        cache = _cache_path(csv_path, depth, multipv, engine_tag, nodes=nodes)
         if cache.exists() and not force:
             print(f"  {cache.name} already exists (use --force to regenerate)")
             generated.append(cache)
             continue
 
-        print(f"\n  Analyzing {csv_path.name} ({engine_tag}, depth={depth}, multipv={multipv})...")
+        print(f"\n  Analyzing {csv_path.name} ({engine_tag}, {search_desc}, multipv={multipv})...")
         cache = await generate_stockfish_cache(
-            csv_path, depth=depth, multipv=multipv,
+            csv_path, depth=depth, nodes=nodes, multipv=multipv,
             hash_mb=hash_mb, threads=threads,
             engine_path=engine_path, engine_tag=engine_tag,
         )
@@ -443,6 +482,7 @@ def run_single(
     multipv: int = 3,
     engine_tag: str = "sf18",
     per_game_elo: bool = True,
+    nodes: int | None = None,
 ) -> dict:
     """Run comparison across all games with a given config, return aggregate stats.
 
@@ -456,7 +496,7 @@ def run_single(
         else:
             w_elo, b_elo = player_elo, player_elo
         if use_stockfish:
-            cache_path = _cache_path(csv_path, depth, multipv, engine_tag)
+            cache_path = _cache_path(csv_path, depth, multipv, engine_tag, nodes=nodes)
             if not cache_path.exists():
                 continue
             comparisons = run_comparison_from_cache(
@@ -474,6 +514,7 @@ def run_single(
 def phase1_sigmoid_sweep(
     game_files: list[Path], player_elo: int, use_stockfish: bool,
     depth: int = 20, multipv: int = 3, engine_tag: str = "sf18",
+    nodes: int | None = None,
 ) -> list[tuple[float, dict, ClassificationConfig]]:
     """Sweep sigmoid parameters with default thresholds."""
     floors = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
@@ -495,7 +536,7 @@ def phase1_sigmoid_sweep(
             elo_scale_range=range_,
             elo_scale_steepness=steep,
         )
-        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag)
+        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag, nodes=nodes)
         if stats["total"] == 0:
             continue
         score = (stats["accuracy"], -stats.get("far_misses", 0))
@@ -513,6 +554,7 @@ def phase2_threshold_sweep(
     best_sigmoid: ClassificationConfig,
     game_files: list[Path], player_elo: int, use_stockfish: bool,
     depth: int = 20, multipv: int = 3, engine_tag: str = "sf18",
+    nodes: int | None = None,
 ) -> list[tuple[float, dict, ClassificationConfig]]:
     """Sweep EP thresholds and candidate gap with fixed sigmoid parameters."""
     excellents = [0.005, 0.01, 0.015, 0.02, 0.025]
@@ -540,7 +582,7 @@ def phase2_threshold_sweep(
             ep_mistake=mist,
             great_min_candidate_gap_cp=cg,
         )
-        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag)
+        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag, nodes=nodes)
         if stats["total"] == 0:
             continue
         score = (stats["accuracy"], -stats.get("far_misses", 0))
@@ -558,6 +600,7 @@ def phase2b_special_sweep(
     best_config: ClassificationConfig,
     game_files: list[Path], player_elo: int, use_stockfish: bool,
     depth: int = 20, multipv: int = 3, engine_tag: str = "sf18",
+    nodes: int | None = None,
 ) -> list[tuple[float, dict, ClassificationConfig]]:
     """Sweep miss, best-promotion, and Elo-dependent excellent parameters."""
     miss_opp_thresholds = [0.04, 0.06, 0.08, 0.10, 0.15]
@@ -584,7 +627,7 @@ def phase2b_special_sweep(
             ep_excellent_low_elo=ele,
             excellent_elo_threshold=elet,
         )
-        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag)
+        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag, nodes=nodes)
         if stats["total"] == 0:
             continue
         score = (stats["accuracy"], -stats.get("far_misses", 0))
@@ -602,6 +645,7 @@ def phase3_fine_tune(
     best_config: ClassificationConfig,
     game_files: list[Path], player_elo: int, use_stockfish: bool,
     depth: int = 20, multipv: int = 3, engine_tag: str = "sf18",
+    nodes: int | None = None,
 ) -> list[tuple[float, dict, ClassificationConfig]]:
     """Fine-tune around the best config from phases 1+2."""
     bc = best_config
@@ -645,7 +689,7 @@ def phase3_fine_tune(
             miss_opponent_ep_loss_threshold=miss_opp,
             miss_min_ep_loss=miss_ep,
         )
-        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag)
+        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag, nodes=nodes)
         if stats["total"] == 0:
             continue
         score = (stats["accuracy"], -stats.get("far_misses", 0))
@@ -666,13 +710,14 @@ def sweep_engine_params(
     depths: list[int] | None = None,
     multipvs: list[int] | None = None,
     engine_tags: list[str] | None = None,
+    node_counts: list[int] | None = None,
     config: ClassificationConfig | None = None,
 ) -> list[dict]:
     """
-    Sweep depth/multipv/engine-version combinations using pre-generated caches.
+    Sweep depth/nodes/multipv/engine-version combinations using pre-generated caches.
     Each combination requires a cache file (generate with --generate-cache).
 
-    Returns sorted list of {engine, depth, multipv, accuracy, far_misses, ...} dicts.
+    Returns sorted list of {engine, depth/nodes, multipv, accuracy, far_misses, ...} dicts.
     """
     if depths is None:
         depths = [14, 16, 18, 20, 22, 24, 26]
@@ -682,18 +727,31 @@ def sweep_engine_params(
         # Auto-discover available engine tags from cache filenames
         engine_tags = set()
         for csv_path in game_files:
-            for cache in csv_path.parent.glob(f"{csv_path.stem}_sf*_d*_pv*.json"):
+            for cache in csv_path.parent.glob(f"{csv_path.stem}_sf*_*_pv*.json"):
                 # Extract engine tag: game_01_sf16.1_d20_pv3.json → sf16.1
                 parts = cache.stem.split("_")
                 for j, p in enumerate(parts):
-                    if p.startswith("sf") and j + 1 < len(parts) and parts[j + 1].startswith("d"):
+                    if p.startswith("sf") and j + 1 < len(parts) and (parts[j + 1].startswith("d") or parts[j + 1].startswith("n")):
                         engine_tags.add(p)
                         break
         engine_tags = sorted(engine_tags) if engine_tags else ["sf18"]
     if config is None:
         config = ClassificationConfig()
 
+    # Auto-discover node-based caches if no explicit node_counts
+    if node_counts is None:
+        node_counts_set = set()
+        for csv_path in game_files:
+            for cache in csv_path.parent.glob(f"{csv_path.stem}_sf*_n*_pv*.json"):
+                parts = cache.stem.split("_")
+                for p in parts:
+                    if p.startswith("n") and p[1:].isdigit():
+                        node_counts_set.add(int(p[1:]))
+        node_counts = sorted(node_counts_set) if node_counts_set else []
+
     results = []
+
+    # Sweep depth-based configs
     for etag, depth, mpv in product(engine_tags, depths, multipvs):
         available_games = []
         for csv_path in game_files:
@@ -710,7 +768,39 @@ def sweep_engine_params(
 
         results.append({
             "engine": etag,
+            "search": f"d{depth}",
             "depth": depth,
+            "nodes": None,
+            "multipv": mpv,
+            "games": len(available_games),
+            "total_moves": stats["total"],
+            "accuracy": stats["accuracy"],
+            "matches": stats["matches"],
+            "close_misses": stats.get("close_misses", 0),
+            "far_misses": stats.get("far_misses", 0),
+            "by_class": stats.get("by_class", {}),
+        })
+
+    # Sweep node-based configs
+    for etag, nc, mpv in product(engine_tags, node_counts, multipvs):
+        available_games = []
+        for csv_path in game_files:
+            cache = _cache_path(csv_path, 0, mpv, etag, nodes=nc)
+            if cache.exists():
+                available_games.append(csv_path)
+
+        if not available_games:
+            continue
+
+        stats = run_single(config, available_games, player_elo, True, 0, mpv, etag, nodes=nc)
+        if stats["total"] == 0:
+            continue
+
+        results.append({
+            "engine": etag,
+            "search": f"n{nc // 1000}k" if nc >= 1000 else f"n{nc}",
+            "depth": None,
+            "nodes": nc,
             "multipv": mpv,
             "games": len(available_games),
             "total_moves": stats["total"],
@@ -765,23 +855,23 @@ def print_engine_sweep_results(results: list[dict]):
     print(f"\n{'='*80}")
     print(f" ENGINE PARAMETER SWEEP -- {len(results)} configurations tested")
     print(f"{'='*80}")
-    print(f"\n  {'Engine':<8} {'Depth':>5} {'MPV':>4} {'Games':>5} {'Moves':>6} {'Accuracy':>8} {'Matches':>7} {'Close':>5} {'Far':>4}")
-    print(f"  {'-'*58}")
+    print(f"\n  {'Engine':<8} {'Search':>10} {'MPV':>4} {'Games':>5} {'Moves':>6} {'Accuracy':>8} {'Matches':>7} {'Close':>5} {'Far':>4}")
+    print(f"  {'-'*63}")
 
     for r in results:
         print(
-            f"  {r['engine']:<8} {r['depth']:>5} {r['multipv']:>4} {r['games']:>5} "
+            f"  {r['engine']:<8} {r['search']:>10} {r['multipv']:>4} {r['games']:>5} "
             f"{r['total_moves']:>6} {r['accuracy']:>7.1%} "
             f"{r['matches']:>7} {r['close_misses']:>5} {r['far_misses']:>4}"
         )
 
     if results:
         best = results[0]
-        print(f"\n  Best match: {best['engine']} depth={best['depth']}, multipv={best['multipv']} "
+        print(f"\n  Best match: {best['engine']} {best['search']}, multipv={best['multipv']} "
               f"({best['accuracy']:.1%} accuracy, {best['far_misses']} far misses)")
 
         # Per-class breakdown for best config
-        print(f"\n  Per-class breakdown ({best['engine']}, depth={best['depth']}, mpv={best['multipv']}):")
+        print(f"\n  Per-class breakdown ({best['engine']}, {best['search']}, mpv={best['multipv']}):")
         by_class = best.get("by_class", {})
         for cls in sorted(by_class, key=lambda x: CLASS_SEVERITY.get(x, 99)):
             info = by_class[cls]
@@ -850,10 +940,15 @@ def cmd_compare(args):
     game_files = _find_game_csvs()
     config = ClassificationConfig()
     engine_path, engine_tag = _resolve_engine(args.engine)
+    nodes = args.nodes
 
     print(f"\nCompare mode: {'Stockfish (cached)' if args.stockfish else 'Mock (chess.com evals)'}")
     if args.stockfish:
         print(f"Engine: {engine_tag} ({engine_path})")
+        if nodes:
+            print(f"Search: nodes={nodes:,}")
+        else:
+            print(f"Search: depth={args.depth}")
     print(f"Fallback Elo: {args.elo} (per-game Elos from game_elos.json)")
     print(f"Games: {[f.name for f in game_files]}")
 
@@ -865,7 +960,7 @@ def cmd_compare(args):
         print(f"{'='*60}")
 
         if args.stockfish:
-            cache = _cache_path(csv_path, args.depth, args.multipv, engine_tag)
+            cache = _cache_path(csv_path, args.depth, args.multipv, engine_tag, nodes=nodes)
             if not cache.exists():
                 print(f"  No cache at {cache.name} -- run --generate-cache first")
                 continue
@@ -893,6 +988,7 @@ def cmd_compare(args):
 def cmd_generate_cache(args):
     """Generate Stockfish caches for all game files."""
     engine_path, engine_tag = _resolve_engine(args.engine)
+    nodes = args.nodes
 
     if not Path(engine_path).exists() and not shutil.which(engine_path):
         print(f"ERROR: Engine binary not found: {engine_path}")
@@ -903,14 +999,19 @@ def cmd_generate_cache(args):
     game_files = _find_game_csvs()
     print(f"\nGenerating Stockfish caches:")
     print(f"  Engine: {engine_tag} ({engine_path})")
-    print(f"  Params: depth={args.depth}, multipv={args.multipv}, "
-          f"hash={args.hash_mb}MB, threads={args.threads}")
+    if nodes:
+        print(f"  Search: nodes={nodes:,}, multipv={args.multipv}, "
+              f"hash={args.hash_mb}MB, threads={args.threads}")
+    else:
+        print(f"  Search: depth={args.depth}, multipv={args.multipv}, "
+              f"hash={args.hash_mb}MB, threads={args.threads}")
     print(f"  Games: {[f.name for f in game_files]}")
 
     start = time.time()
     asyncio.run(generate_all_caches(
         game_files,
         depth=args.depth,
+        nodes=nodes,
         multipv=args.multipv,
         hash_mb=args.hash_mb,
         threads=args.threads,
@@ -923,25 +1024,27 @@ def cmd_generate_cache(args):
 
 
 def cmd_sweep_engine(args):
-    """Sweep depth/multipv/engine-version to find which best match chess.com."""
+    """Sweep depth/nodes/multipv/engine-version to find which best match chess.com."""
     game_files = _find_game_csvs()
     config = ClassificationConfig()
 
     depths = [int(d) for d in args.depths.split(",")] if args.depths else None
     multipvs = [int(m) for m in args.multipvs.split(",")] if args.multipvs else None
     engine_tags = [t.strip() for t in args.engine_tags.split(",")] if args.engine_tags else None
+    node_counts = [int(n) for n in args.node_counts.split(",")] if args.node_counts else None
 
     print(f"\nEngine parameter sweep:")
     print(f"  Depths: {depths or [14, 16, 18, 20, 22, 24, 26]}")
+    print(f"  Node counts: {node_counts or '(auto-discover from caches)'}")
     print(f"  MultiPVs: {multipvs or [2, 3, 4, 5]}")
     print(f"  Engine versions: {engine_tags or '(auto-discover from caches)'}")
     print(f"  Elo: {args.elo}")
     print(f"  Games: {[f.name for f in game_files]}")
 
-    # Check available caches
+    # Check available caches (both depth-based and node-based)
     available_any = False
     for csv_path in game_files:
-        caches = list(csv_path.parent.glob(f"{csv_path.stem}_sf*_d*_pv*.json"))
+        caches = list(csv_path.parent.glob(f"{csv_path.stem}_sf*_*_pv*.json"))
         if caches:
             available_any = True
             print(f"  {csv_path.name}: {', '.join(c.name for c in sorted(caches))}")
@@ -951,13 +1054,13 @@ def cmd_sweep_engine(args):
     if not available_any:
         print("\n  No Stockfish caches found. Run --generate-cache first. Example:")
         print("    python tests/optimize_classification.py --generate-cache --engine sf16.1 --depth 20")
-        print("    python tests/optimize_classification.py --generate-cache --engine sf17 --depth 20")
+        print("    python tests/optimize_classification.py --generate-cache --engine sf16.1 --nodes 2000000")
         print("    python tests/optimize_classification.py --generate-cache --depth 20  # uses system SF")
         return
 
     results = sweep_engine_params(
         game_files, args.elo, depths=depths, multipvs=multipvs,
-        engine_tags=engine_tags, config=config,
+        engine_tags=engine_tags, node_counts=node_counts, config=config,
     )
     print_engine_sweep_results(results)
 
@@ -966,13 +1069,17 @@ def cmd_optimize(args):
     """Run 3-phase parameter optimization (sigmoid + thresholds + fine-tune)."""
     game_files = _find_game_csvs()
     engine_path, engine_tag = _resolve_engine(args.engine)
+    nodes = args.nodes
     mode = "Stockfish (cached)" if args.stockfish else "Mock (chess.com evals)"
     print(f"\nMode: {mode}")
     if args.stockfish:
         print(f"Engine: {engine_tag} ({engine_path})")
     print(f"Fallback Elo: {args.elo} (per-game Elos from game_elos.json)")
     if args.stockfish:
-        print(f"Engine params: depth={args.depth}, multipv={args.multipv}")
+        if nodes:
+            print(f"Engine params: nodes={nodes:,}, multipv={args.multipv}")
+        else:
+            print(f"Engine params: depth={args.depth}, multipv={args.multipv}")
     print(f"Games:")
     for gf in game_files:
         w, b = _game_elos_by_side(gf, fallback_elo=args.elo)
@@ -981,7 +1088,7 @@ def cmd_optimize(args):
     if args.stockfish:
         missing = []
         for gf in game_files:
-            cache = _cache_path(gf, args.depth, args.multipv, engine_tag)
+            cache = _cache_path(gf, args.depth, args.multipv, engine_tag, nodes=nodes)
             if cache.exists():
                 print(f"  + {cache.name}")
             else:
@@ -989,8 +1096,12 @@ def cmd_optimize(args):
                 missing.append(gf.name)
         if missing:
             print(f"\n  WARNING: {len(missing)} games have no cache.")
-            print(f"  Run: python tests/optimize_classification.py --generate-cache "
-                  f"--engine {engine_tag} --depth {args.depth} --multipv {args.multipv}")
+            if nodes:
+                print(f"  Run: python tests/optimize_classification.py --generate-cache "
+                      f"--engine {engine_tag} --nodes {nodes} --multipv {args.multipv}")
+            else:
+                print(f"  Run: python tests/optimize_classification.py --generate-cache "
+                      f"--engine {engine_tag} --depth {args.depth} --multipv {args.multipv}")
 
     start = time.time()
 
@@ -998,6 +1109,7 @@ def cmd_optimize(args):
     print("\n[Phase 1] Sweeping sigmoid parameters (default thresholds)...")
     p1 = phase1_sigmoid_sweep(
         game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
+        nodes=nodes,
     )
     if not p1:
         print("No results -- check that game files and caches exist.")
@@ -1011,6 +1123,7 @@ def cmd_optimize(args):
           f"steep={best_sigmoid.elo_scale_steepness})...")
     p2 = phase2_threshold_sweep(
         best_sigmoid, game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
+        nodes=nodes,
     )
     if not p2:
         print("No threshold results.")
@@ -1022,6 +1135,7 @@ def cmd_optimize(args):
     print(f"\n[Phase 2b] Sweeping special classification parameters...")
     p2b = phase2b_special_sweep(
         best_combined, game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
+        nodes=nodes,
     )
     if p2b:
         print_results("Phase 2b: Special Sweep", p2b, top_n=5)
@@ -1031,6 +1145,7 @@ def cmd_optimize(args):
     print(f"\n[Phase 3] Fine-tuning around best combined config...")
     p3 = phase3_fine_tune(
         best_combined, game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
+        nodes=nodes,
     )
     if not p3:
         print("No fine-tune results.")
@@ -1049,6 +1164,7 @@ def cmd_optimize(args):
     # Run final comparison for detail
     final_stats = run_single(
         best_final, game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
+        nodes=nodes,
     )
     print(f"\n  Accuracy: {final_stats['accuracy']:.1%} "
           f"({final_stats['matches']}/{final_stats['total']})")
@@ -1058,6 +1174,7 @@ def cmd_optimize(args):
     # Compare against default config
     default_stats = run_single(
         ClassificationConfig(), game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
+        nodes=nodes,
     )
     if default_stats["total"] > 0:
         delta = final_stats["accuracy"] - default_stats["accuracy"]
@@ -1079,22 +1196,27 @@ Examples:
   # Quick comparison with current config
   %(prog)s --compare
 
-  # Generate caches with different Stockfish versions
+  # Generate caches with different Stockfish versions (depth-based)
   %(prog)s --generate-cache --engine sf16.1 --depth 20
-  %(prog)s --generate-cache --engine sf17 --depth 20
-  %(prog)s --generate-cache --depth 20                  # system SF (sf18)
 
-  # Sweep engine versions + depth to find best match to chess.com
+  # Generate caches with node-based search (chess.com style)
+  %(prog)s --generate-cache --engine sf16.1 --nodes 2000000
+  %(prog)s --generate-cache --engine sf16.1 --nodes 4000000
+
+  # Sweep engine versions + depth/nodes to find best match to chess.com
   %(prog)s --sweep-engine
 
-  # Run optimization using real Stockfish 16.1 caches
+  # Run optimization using real Stockfish 16.1 node-based caches
+  %(prog)s --stockfish --engine sf16.1 --nodes 2000000
+
+  # Run optimization using depth-based caches
   %(prog)s --stockfish --engine sf16.1 --depth 20
 
   # Run 3-phase optimization using mock evals (no Stockfish)
   %(prog)s --elo 820
 
 Engine aliases: sf16.1, sf17, sf18 (or provide a full path)
-Chess.com reference: Stockfish 16.1 NNUE, node-based search (~depth 18-22),
+Chess.com reference: Stockfish 16.1 NNUE, node-based search (~1-4M nodes),
 multi-PV 2-3, Expected Points classification with Elo-adjusted sigmoid.
 """,
     )
@@ -1125,7 +1247,11 @@ multi-PV 2-3, Expected Points classification with Elo-adjusted sigmoid.
     )
     parser.add_argument(
         "--depth", type=int, default=20,
-        help="Stockfish analysis depth (default: 20)",
+        help="Stockfish analysis depth (default: 20, ignored if --nodes is set)",
+    )
+    parser.add_argument(
+        "--nodes", type=int, default=None,
+        help="Node-based search limit (chess.com uses ~1-4M). Overrides --depth.",
     )
     parser.add_argument(
         "--multipv", type=int, default=3,
@@ -1162,6 +1288,10 @@ multi-PV 2-3, Expected Points classification with Elo-adjusted sigmoid.
     parser.add_argument(
         "--engine-tags", type=str, default=None,
         help="Comma-separated engine version tags to sweep (default: auto-discover from caches)",
+    )
+    parser.add_argument(
+        "--node-counts", type=str, default=None,
+        help="Comma-separated node counts to sweep (default: auto-discover from caches)",
     )
 
     args = parser.parse_args()
