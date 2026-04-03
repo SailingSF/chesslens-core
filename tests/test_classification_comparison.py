@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -62,6 +63,7 @@ def _parse_eval(raw: str) -> tuple[Optional[float], Optional[int], bool]:
     return float(raw), None, False
 
 
+@lru_cache(maxsize=None)
 def load_chesscom_csv(path: Path) -> list[ChessComMove]:
     """Load a chess.com game review CSV into structured records."""
     moves = []
@@ -537,7 +539,10 @@ def print_comparison_table(comparisons: list[MoveComparison]) -> None:
         )
 
 
-def compute_accuracy_stats(comparisons: list[MoveComparison]) -> dict:
+def compute_accuracy_stats(
+    comparisons: list[MoveComparison],
+    include_breakdown: bool = True,
+) -> dict:
     """Compute summary accuracy statistics."""
     # Exclude book moves from accuracy calculation (we don't have a book classifier)
     non_book = [c for c in comparisons if c.chesscom_class != "book"]
@@ -559,6 +564,17 @@ def compute_accuracy_stats(comparisons: list[MoveComparison]) -> dict:
             else:
                 far_misses += 1
 
+    stats = {
+        "total": total,
+        "matches": matches,
+        "accuracy": matches / total,
+        "close_misses": close_misses,
+        "far_misses": far_misses,
+    }
+
+    if not include_breakdown:
+        return stats
+
     # Breakdown by chess.com classification
     by_class: dict[str, dict] = {}
     for c in non_book:
@@ -571,14 +587,8 @@ def compute_accuracy_stats(comparisons: list[MoveComparison]) -> dict:
         our = c.our_class
         by_class[cc]["our_labels"][our] = by_class[cc]["our_labels"].get(our, 0) + 1
 
-    return {
-        "total": total,
-        "matches": matches,
-        "accuracy": matches / total,
-        "close_misses": close_misses,
-        "far_misses": far_misses,
-        "by_class": by_class,
-    }
+    stats["by_class"] = by_class
+    return stats
 
 
 def print_accuracy_report(stats: dict) -> None:

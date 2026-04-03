@@ -49,6 +49,7 @@ import shutil
 import sys
 import time
 from dataclasses import asdict, replace
+from functools import lru_cache
 from itertools import product
 from pathlib import Path
 from typing import Optional
@@ -127,6 +128,7 @@ def _find_game_csvs() -> list[Path]:
     return sorted(GAMES_DIR.glob("game_*.csv"))
 
 
+@lru_cache(maxsize=1)
 def _load_game_elos() -> dict[str, dict]:
     """
     Load per-game Elo ratings from game_elos.json.
@@ -387,27 +389,7 @@ def run_comparison_from_cache(
 
     moves = load_chesscom_csv(csv_path)
 
-    with open(cache_path) as f:
-        cache_data = json.load(f)
-
-    engine_results = []
-    for entry in cache_data:
-        candidates = []
-        for c in entry["candidates"]:
-            candidates.append(CandidateMove(
-                move=chess.Move.from_uci(c["move"]),
-                score_cp=c.get("score_cp"),
-                mate_in=c.get("mate_in"),
-                pv=[chess.Move.from_uci(m) for m in c.get("pv", [])],
-                wdl_win=c.get("wdl_win"),
-                wdl_draw=c.get("wdl_draw"),
-                wdl_loss=c.get("wdl_loss"),
-            ))
-        engine_results.append(EngineResult(
-            fen=entry["fen"],
-            depth=entry["depth"],
-            candidates=candidates,
-        ))
+    engine_results = _load_cached_engine_results(cache_path)
 
     assembler = ContextAssembler(classification_config=config)
     comparisons = []
@@ -469,9 +451,196 @@ def run_comparison_from_cache(
     return comparisons
 
 
+@lru_cache(maxsize=None)
+def _load_cached_engine_results(cache_path: Path) -> tuple:
+    """Load and decode cached engine results once per cache file."""
+    import chess
+    from chess_engine.service import CandidateMove, EngineResult
+
+    with open(cache_path) as f:
+        cache_data = json.load(f)
+
+    engine_results = []
+    for entry in cache_data:
+        candidates = []
+        for c in entry["candidates"]:
+            candidates.append(CandidateMove(
+                move=chess.Move.from_uci(c["move"]),
+                score_cp=c.get("score_cp"),
+                mate_in=c.get("mate_in"),
+                pv=[chess.Move.from_uci(m) for m in c.get("pv", [])],
+                wdl_win=c.get("wdl_win"),
+                wdl_draw=c.get("wdl_draw"),
+                wdl_loss=c.get("wdl_loss"),
+            ))
+        engine_results.append(EngineResult(
+            fen=entry["fen"],
+            depth=entry["depth"],
+            candidates=candidates,
+        ))
+
+    return tuple(engine_results)
+
+
 # ---------------------------------------------------------------------------
 # Grid search helpers
 # ---------------------------------------------------------------------------
+
+OptimizationResult = tuple[tuple[float, int], dict, ClassificationConfig]
+
+
+def _config_key(config: ClassificationConfig) -> tuple:
+    """Stable cache key for a ClassificationConfig."""
+    return tuple(asdict(config).items())
+
+
+def _score_stats(stats: dict) -> tuple[float, int]:
+    """Primary optimization score: maximize accuracy, then minimize far misses."""
+    return (stats["accuracy"], -stats.get("far_misses", 0))
+
+
+def _format_score(score: tuple[float, int] | None) -> str:
+    if score is None:
+        return "n/a"
+    return f"{score[0]:.1%}, far={-score[1]}"
+
+
+def _print_sweep_progress(
+    label: str,
+    done: int,
+    total: int,
+    started_at: float,
+    best_score: tuple[float, int] | None = None,
+) -> None:
+    """Print a one-line progress update with ETA and current best score."""
+    elapsed = max(0.001, time.time() - started_at)
+    rate = done / elapsed
+    eta = (total - done) / rate if rate > 0 else 0.0
+    best_str = f", best={_format_score(best_score)}" if best_score is not None else ""
+    print(
+        f"    {label}: {done}/{total} ({done / total:.0%}), "
+        f"elapsed={elapsed:.1f}s, eta={eta:.1f}s{best_str}",
+        end="\r" if done < total else "\n",
+        flush=True,
+    )
+
+
+def _coerce_param_value(template: int | float, value: int | float) -> int | float:
+    if isinstance(template, int):
+        return int(round(value))
+    return round(float(value), 6)
+
+
+def _is_valid_phase3_config(config: ClassificationConfig) -> bool:
+    return (
+        config.elo_scale_floor >= 0.1
+        and config.elo_scale_range >= 0.1
+        and config.elo_scale_floor + config.elo_scale_range <= 1.05
+        and 0 < config.ep_excellent < config.ep_good < config.ep_inaccuracy < config.ep_mistake
+        and config.great_min_candidate_gap_cp >= 50
+        and config.best_promotion_min_gap_cp >= 5
+        and config.miss_opponent_ep_loss_threshold >= 0.04
+        and config.miss_min_ep_loss >= 0.04
+        and config.ep_excellent_low_elo > 0
+    )
+
+
+def _unique_configs(configs: list[ClassificationConfig]) -> list[ClassificationConfig]:
+    seen = set()
+    unique = []
+    for config in configs:
+        key = _config_key(config)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(config)
+    return unique
+
+
+def _top_unique_configs(results: list[OptimizationResult], limit: int) -> list[ClassificationConfig]:
+    seen = set()
+    top = []
+    for _, _, config in sorted(results, key=lambda x: x[0], reverse=True):
+        key = _config_key(config)
+        if key in seen:
+            continue
+        seen.add(key)
+        top.append(config)
+        if len(top) >= limit:
+            break
+    return top
+
+
+class OptimizerRunner:
+    """Memoized wrapper around `run_single` for repeated optimizer evaluations."""
+
+    def __init__(
+        self,
+        game_files: list[Path],
+        player_elo: int,
+        use_stockfish: bool,
+        depth: int = 20,
+        multipv: int = 3,
+        engine_tag: str = "sf18",
+        nodes: int | None = None,
+        per_game_elo: bool = True,
+    ):
+        self.game_files = game_files
+        self.player_elo = player_elo
+        self.use_stockfish = use_stockfish
+        self.depth = depth
+        self.multipv = multipv
+        self.engine_tag = engine_tag
+        self.nodes = nodes
+        self.per_game_elo = per_game_elo
+        self._summary_cache: dict[tuple, dict] = {}
+        self._detailed_cache: dict[tuple, dict] = {}
+
+    def evaluate(
+        self,
+        config: ClassificationConfig,
+        include_breakdown: bool = False,
+    ) -> dict:
+        key = _config_key(config)
+
+        if include_breakdown:
+            if key not in self._detailed_cache:
+                self._detailed_cache[key] = run_single(
+                    config,
+                    self.game_files,
+                    self.player_elo,
+                    self.use_stockfish,
+                    self.depth,
+                    self.multipv,
+                    self.engine_tag,
+                    self.per_game_elo,
+                    nodes=self.nodes,
+                    include_breakdown=True,
+                )
+            return self._detailed_cache[key]
+
+        if key in self._detailed_cache:
+            return self._detailed_cache[key]
+
+        if key not in self._summary_cache:
+            self._summary_cache[key] = run_single(
+                config,
+                self.game_files,
+                self.player_elo,
+                self.use_stockfish,
+                self.depth,
+                self.multipv,
+                self.engine_tag,
+                self.per_game_elo,
+                nodes=self.nodes,
+                include_breakdown=False,
+            )
+        return self._summary_cache[key]
+
+    @property
+    def unique_evaluations(self) -> int:
+        return len(set(self._summary_cache) | set(self._detailed_cache))
+
 
 def run_single(
     config: ClassificationConfig,
@@ -483,6 +652,7 @@ def run_single(
     engine_tag: str = "sf18",
     per_game_elo: bool = True,
     nodes: int | None = None,
+    include_breakdown: bool = True,
 ) -> dict:
     """Run comparison across all games with a given config, return aggregate stats.
 
@@ -508,14 +678,12 @@ def run_single(
             comparisons = run_comparison(csv_path, config=config, player_elo=(w_elo + b_elo) // 2)
         all_comparisons.extend(comparisons)
 
-    return compute_accuracy_stats(all_comparisons)
+    return compute_accuracy_stats(all_comparisons, include_breakdown=include_breakdown)
 
 
 def phase1_sigmoid_sweep(
-    game_files: list[Path], player_elo: int, use_stockfish: bool,
-    depth: int = 20, multipv: int = 3, engine_tag: str = "sf18",
-    nodes: int | None = None,
-) -> list[tuple[float, dict, ClassificationConfig]]:
+    evaluator: OptimizerRunner,
+) -> list[OptimizationResult]:
     """Sweep sigmoid parameters with default thresholds."""
     floors = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
     ranges = [0.2, 0.3, 0.4, 0.5, 0.6]
@@ -525,6 +693,8 @@ def phase1_sigmoid_sweep(
     base = ClassificationConfig()
     total = sum(1 for f, r, s in product(floors, ranges, steepnesses) if f + r <= 1.05)
     done = 0
+    started_at = time.time()
+    best_score = None
 
     for floor, range_, steep in product(floors, ranges, steepnesses):
         if floor + range_ > 1.05:
@@ -536,26 +706,25 @@ def phase1_sigmoid_sweep(
             elo_scale_range=range_,
             elo_scale_steepness=steep,
         )
-        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag, nodes=nodes)
+        stats = evaluator.evaluate(config)
         if stats["total"] == 0:
             continue
-        score = (stats["accuracy"], -stats.get("far_misses", 0))
+        score = _score_stats(stats)
         results.append((score, stats, config))
+        if best_score is None or score > best_score:
+            best_score = score
 
-        if done % 10 == 0:
-            print(f"    {done}/{total} configs tested...", end="\r", flush=True)
+        if done % 10 == 0 or done == total:
+            _print_sweep_progress("phase 1", done, total, started_at, best_score)
 
-    print(f"    {done}/{total} configs tested.     ")
     results.sort(key=lambda x: x[0], reverse=True)
     return results
 
 
 def phase2_threshold_sweep(
     best_sigmoid: ClassificationConfig,
-    game_files: list[Path], player_elo: int, use_stockfish: bool,
-    depth: int = 20, multipv: int = 3, engine_tag: str = "sf18",
-    nodes: int | None = None,
-) -> list[tuple[float, dict, ClassificationConfig]]:
+    evaluator: OptimizerRunner,
+) -> list[OptimizationResult]:
     """Sweep EP thresholds and candidate gap with fixed sigmoid parameters."""
     excellents = [0.005, 0.01, 0.015, 0.02, 0.025]
     goods = [0.02, 0.03, 0.04, 0.05, 0.06]
@@ -570,6 +739,8 @@ def phase2_threshold_sweep(
     ]
     total = len(valid_combos)
     done = 0
+    started_at = time.time()
+    best_score = None
 
     results = []
     for exc, good, inacc, mist, cg in valid_combos:
@@ -582,26 +753,25 @@ def phase2_threshold_sweep(
             ep_mistake=mist,
             great_min_candidate_gap_cp=cg,
         )
-        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag, nodes=nodes)
+        stats = evaluator.evaluate(config)
         if stats["total"] == 0:
             continue
-        score = (stats["accuracy"], -stats.get("far_misses", 0))
+        score = _score_stats(stats)
         results.append((score, stats, config))
+        if best_score is None or score > best_score:
+            best_score = score
 
-        if done % 50 == 0:
-            print(f"    {done}/{total} configs tested...", end="\r", flush=True)
+        if done % 50 == 0 or done == total:
+            _print_sweep_progress("phase 2", done, total, started_at, best_score)
 
-    print(f"    {done}/{total} configs tested.     ")
     results.sort(key=lambda x: x[0], reverse=True)
     return results
 
 
 def phase2b_special_sweep(
     best_config: ClassificationConfig,
-    game_files: list[Path], player_elo: int, use_stockfish: bool,
-    depth: int = 20, multipv: int = 3, engine_tag: str = "sf18",
-    nodes: int | None = None,
-) -> list[tuple[float, dict, ClassificationConfig]]:
+    evaluator: OptimizerRunner,
+) -> list[OptimizationResult]:
     """Sweep miss, best-promotion, and Elo-dependent excellent parameters."""
     miss_opp_thresholds = [0.04, 0.06, 0.08, 0.10, 0.15]
     miss_min_eps = [0.06, 0.10, 0.15, 0.20, 0.30]
@@ -615,6 +785,8 @@ def phase2b_special_sweep(
     ))
     total = len(combos)
     done = 0
+    started_at = time.time()
+    best_score = None
 
     results = []
     for miss_opp, miss_ep, bg, ele, elet in combos:
@@ -627,75 +799,161 @@ def phase2b_special_sweep(
             ep_excellent_low_elo=ele,
             excellent_elo_threshold=elet,
         )
-        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag, nodes=nodes)
+        stats = evaluator.evaluate(config)
         if stats["total"] == 0:
             continue
-        score = (stats["accuracy"], -stats.get("far_misses", 0))
+        score = _score_stats(stats)
         results.append((score, stats, config))
+        if best_score is None or score > best_score:
+            best_score = score
 
-        if done % 100 == 0:
-            print(f"    {done}/{total} configs tested...", end="\r", flush=True)
+        if done % 100 == 0 or done == total:
+            _print_sweep_progress("phase 2b", done, total, started_at, best_score)
 
-    print(f"    {done}/{total} configs tested.     ")
     results.sort(key=lambda x: x[0], reverse=True)
     return results
 
 
 def phase3_fine_tune(
     best_config: ClassificationConfig,
-    game_files: list[Path], player_elo: int, use_stockfish: bool,
-    depth: int = 20, multipv: int = 3, engine_tag: str = "sf18",
-    nodes: int | None = None,
-) -> list[tuple[float, dict, ClassificationConfig]]:
-    """Fine-tune around the best config from phases 1+2."""
-    bc = best_config
-    floors = [bc.elo_scale_floor + d for d in [-0.05, 0.0, 0.05]]
-    ranges = [bc.elo_scale_range + d for d in [-0.05, 0.0, 0.05]]
-    excellents = [bc.ep_excellent + d for d in [-0.005, 0.0, 0.005]]
-    goods = [bc.ep_good + d for d in [-0.005, 0.0, 0.005]]
-    inaccuracies = [bc.ep_inaccuracy + d for d in [-0.01, 0.0, 0.01]]
-    mistakes = [bc.ep_mistake + d for d in [-0.02, 0.0, 0.02]]
-    candidate_gaps = [bc.great_min_candidate_gap_cp + d for d in [-25, 0, 25]]
-    best_gaps = [bc.best_promotion_min_gap_cp + d for d in [-10, 0, 10]]
-    miss_opp_thresholds = [bc.miss_opponent_ep_loss_threshold + d for d in [-0.02, 0.0, 0.02]]
-    miss_min_eps = [bc.miss_min_ep_loss + d for d in [-0.03, 0.0, 0.03]]
+    evaluator: OptimizerRunner,
+    seed_configs: list[ClassificationConfig] | None = None,
+    beam_width: int = 4,
+    rounds: int = 3,
+) -> list[OptimizationResult]:
+    """
+    Fine-tune around several strong configs using beam/local search.
 
-    results = []
-    done = 0
+    This replaces the old 10-D Cartesian product, which could easily explode
+    into tens of thousands of runs with no intermediate visibility.
+    """
+    if seed_configs is None:
+        seed_configs = [best_config]
 
-    combos = list(product(
-        floors, ranges, excellents, goods, inaccuracies, mistakes,
-        candidate_gaps, best_gaps, miss_opp_thresholds, miss_min_eps,
-    ))
+    seed_configs = _unique_configs([best_config, *seed_configs])
+    step_schedule = [
+        {
+            "elo_scale_floor": (-0.05, 0.05),
+            "elo_scale_range": (-0.05, 0.05),
+            "ep_excellent": (-0.005, 0.005),
+            "ep_good": (-0.005, 0.005),
+            "ep_inaccuracy": (-0.01, 0.01),
+            "ep_mistake": (-0.02, 0.02),
+            "great_min_candidate_gap_cp": (-25, 25),
+            "best_promotion_min_gap_cp": (-10, 10),
+            "miss_opponent_ep_loss_threshold": (-0.02, 0.02),
+            "miss_min_ep_loss": (-0.03, 0.03),
+            "ep_excellent_low_elo": (-0.002, 0.002),
+            "excellent_elo_threshold": (-200, 200),
+        },
+        {
+            "elo_scale_floor": (-0.02, 0.02),
+            "elo_scale_range": (-0.02, 0.02),
+            "ep_excellent": (-0.002, 0.002),
+            "ep_good": (-0.002, 0.002),
+            "ep_inaccuracy": (-0.005, 0.005),
+            "ep_mistake": (-0.01, 0.01),
+            "great_min_candidate_gap_cp": (-10, 10),
+            "best_promotion_min_gap_cp": (-5, 5),
+            "miss_opponent_ep_loss_threshold": (-0.01, 0.01),
+            "miss_min_ep_loss": (-0.015, 0.015),
+            "ep_excellent_low_elo": (-0.001, 0.001),
+            "excellent_elo_threshold": (-100, 100),
+        },
+        {
+            "elo_scale_floor": (-0.01, 0.01),
+            "elo_scale_range": (-0.01, 0.01),
+            "ep_excellent": (-0.001, 0.001),
+            "ep_good": (-0.001, 0.001),
+            "ep_inaccuracy": (-0.003, 0.003),
+            "ep_mistake": (-0.005, 0.005),
+            "great_min_candidate_gap_cp": (-5, 5),
+            "best_promotion_min_gap_cp": (-2, 2),
+            "miss_opponent_ep_loss_threshold": (-0.005, 0.005),
+            "miss_min_ep_loss": (-0.01, 0.01),
+            "ep_excellent_low_elo": (-0.0005, 0.0005),
+            "excellent_elo_threshold": (-50, 50),
+        },
+    ][:rounds]
 
-    for floor, range_, exc, good, inacc, mist, cg, bg, miss_opp, miss_ep in combos:
-        if floor + range_ > 1.05 or floor < 0.1 or range_ < 0.1:
-            continue
-        if not (0 < exc < good < inacc < mist):
-            continue
-        if cg < 50 or miss_opp < 0.04 or miss_ep < 0.04 or bg < 5:
-            continue
-        done += 1
-        config = replace(
-            bc,
-            elo_scale_floor=floor,
-            elo_scale_range=range_,
-            ep_excellent=exc,
-            ep_good=good,
-            ep_inaccuracy=inacc,
-            ep_mistake=mist,
-            great_min_candidate_gap_cp=cg,
-            best_promotion_min_gap_cp=bg,
-            miss_opponent_ep_loss_threshold=miss_opp,
-            miss_min_ep_loss=miss_ep,
-        )
-        stats = run_single(config, game_files, player_elo, use_stockfish, depth, multipv, engine_tag, nodes=nodes)
+    results: list[OptimizationResult] = []
+    baseline_start = time.time()
+    baseline_best = None
+    for idx, config in enumerate(seed_configs, start=1):
+        stats = evaluator.evaluate(config)
         if stats["total"] == 0:
             continue
-        score = (stats["accuracy"], -stats.get("far_misses", 0))
+        score = _score_stats(stats)
         results.append((score, stats, config))
+        if baseline_best is None or score > baseline_best:
+            baseline_best = score
+        _print_sweep_progress("phase 3 seeds", idx, len(seed_configs), baseline_start, baseline_best)
 
-    print(f"    {done} configs tested.")
+    if not results:
+        return []
+
+    beam = _top_unique_configs(results, beam_width)
+    best_score = baseline_best
+
+    for round_idx, step_map in enumerate(step_schedule, start=1):
+        frontier = []
+        seen_frontier = {_config_key(config) for _, _, config in results}
+
+        for config in beam:
+            for field_name, deltas in step_map.items():
+                current_value = getattr(config, field_name)
+                for delta in deltas:
+                    candidate = replace(
+                        config,
+                        **{
+                            field_name: _coerce_param_value(
+                                current_value,
+                                current_value + delta,
+                            )
+                        },
+                    )
+                    candidate_key = _config_key(candidate)
+                    if candidate_key in seen_frontier or not _is_valid_phase3_config(candidate):
+                        continue
+                    seen_frontier.add(candidate_key)
+                    frontier.append(candidate)
+
+        if not frontier:
+            print(f"    phase 3 round {round_idx}: no new neighbors to evaluate")
+            break
+
+        started_at = time.time()
+        round_best = best_score
+        total = len(frontier)
+        for done, candidate in enumerate(frontier, start=1):
+            stats = evaluator.evaluate(candidate)
+            if stats["total"] == 0:
+                continue
+            score = _score_stats(stats)
+            results.append((score, stats, candidate))
+            if score > round_best:
+                round_best = score
+            if done % 25 == 0 or done == total:
+                _print_sweep_progress(
+                    f"phase 3 round {round_idx}",
+                    done,
+                    total,
+                    started_at,
+                    round_best,
+                )
+
+        results.sort(key=lambda x: x[0], reverse=True)
+        beam = _top_unique_configs(results, beam_width)
+        current_best = results[0]
+        improved = "improved" if current_best[0] > best_score else "held"
+        best_score = current_best[0]
+        print(
+            f"    phase 3 round {round_idx} {improved}: "
+            f"{current_best[1]['accuracy']:.1%} accuracy, "
+            f"{current_best[1].get('far_misses', 0)} far misses "
+            f"(beam={len(beam)}, candidates={len(frontier)})"
+        )
+
     results.sort(key=lambda x: x[0], reverse=True)
     return results
 
@@ -819,11 +1077,18 @@ def sweep_engine_params(
 # Printing / reporting
 # ---------------------------------------------------------------------------
 
-def print_results(title: str, results: list, top_n: int = 10):
+def print_results(
+    title: str,
+    results: list[OptimizationResult],
+    top_n: int = 10,
+    evaluator: OptimizerRunner | None = None,
+):
     print(f"\n{'='*80}")
     print(f" {title} -- Top {min(top_n, len(results))} of {len(results)} runs")
     print(f"{'='*80}")
     for i, (score, stats, config) in enumerate(results[:top_n]):
+        if evaluator is not None and "by_class" not in stats:
+            stats = evaluator.evaluate(config, include_breakdown=True)
         acc = stats["accuracy"]
         fm = stats.get("far_misses", "?")
         cm = stats.get("close_misses", "?")
@@ -1070,6 +1335,15 @@ def cmd_optimize(args):
     game_files = _find_game_csvs()
     engine_path, engine_tag = _resolve_engine(args.engine)
     nodes = args.nodes
+    evaluator = OptimizerRunner(
+        game_files,
+        args.elo,
+        args.stockfish,
+        depth=args.depth,
+        multipv=args.multipv,
+        engine_tag=engine_tag,
+        nodes=nodes,
+    )
     mode = "Stockfish (cached)" if args.stockfish else "Mock (chess.com evals)"
     print(f"\nMode: {mode}")
     if args.stockfish:
@@ -1107,75 +1381,63 @@ def cmd_optimize(args):
 
     # --- Phase 1: Sigmoid sweep ---
     print("\n[Phase 1] Sweeping sigmoid parameters (default thresholds)...")
-    p1 = phase1_sigmoid_sweep(
-        game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
-        nodes=nodes,
-    )
+    p1 = phase1_sigmoid_sweep(evaluator)
     if not p1:
         print("No results -- check that game files and caches exist.")
         return
-    print_results("Phase 1: Sigmoid Sweep", p1, top_n=5)
+    print_results("Phase 1: Sigmoid Sweep", p1, top_n=5, evaluator=evaluator)
     best_sigmoid = p1[0][2]
 
     # --- Phase 2: Threshold sweep ---
     print(f"\n[Phase 2] Sweeping EP thresholds (best sigmoid: "
           f"floor={best_sigmoid.elo_scale_floor}, range={best_sigmoid.elo_scale_range}, "
           f"steep={best_sigmoid.elo_scale_steepness})...")
-    p2 = phase2_threshold_sweep(
-        best_sigmoid, game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
-        nodes=nodes,
-    )
+    p2 = phase2_threshold_sweep(best_sigmoid, evaluator)
     if not p2:
         print("No threshold results.")
         return
-    print_results("Phase 2: Threshold Sweep", p2, top_n=5)
+    print_results("Phase 2: Threshold Sweep", p2, top_n=5, evaluator=evaluator)
     best_combined = p2[0][2]
 
     # --- Phase 2b: Special parameter sweep (miss, best-promotion, low-Elo excellent) ---
     print(f"\n[Phase 2b] Sweeping special classification parameters...")
-    p2b = phase2b_special_sweep(
-        best_combined, game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
-        nodes=nodes,
-    )
+    p2b = phase2b_special_sweep(best_combined, evaluator)
     if p2b:
-        print_results("Phase 2b: Special Sweep", p2b, top_n=5)
+        print_results("Phase 2b: Special Sweep", p2b, top_n=5, evaluator=evaluator)
         best_combined = p2b[0][2]
 
     # --- Phase 3: Fine-tune ---
-    print(f"\n[Phase 3] Fine-tuning around best combined config...")
+    phase3_seeds = [config for _, _, config in p2[:3]]
+    if p2b:
+        phase3_seeds.extend(config for _, _, config in p2b[:3])
+    print(f"\n[Phase 3] Local fine-tuning from {len(_unique_configs(phase3_seeds))} strong seeds...")
     p3 = phase3_fine_tune(
-        best_combined, game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
-        nodes=nodes,
+        best_combined,
+        evaluator,
+        seed_configs=phase3_seeds,
     )
     if not p3:
         print("No fine-tune results.")
         return
-    print_results("Phase 3: Fine-Tuning", p3, top_n=5)
+    print_results("Phase 3: Fine-Tuning", p3, top_n=5, evaluator=evaluator)
     best_final = p3[0][2]
 
     # --- Summary ---
     elapsed = time.time() - start
-    total_runs = len(p1) + len(p2) + len(p2b) + len(p3)
     print(f"\n{'='*80}")
-    print(f" FINAL RESULT -- {total_runs} total runs in {elapsed:.1f}s")
+    print(f" FINAL RESULT -- {evaluator.unique_evaluations} unique configs in {elapsed:.1f}s")
     print(f"{'='*80}")
     print_config_as_python(best_final)
 
     # Run final comparison for detail
-    final_stats = run_single(
-        best_final, game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
-        nodes=nodes,
-    )
+    final_stats = evaluator.evaluate(best_final, include_breakdown=True)
     print(f"\n  Accuracy: {final_stats['accuracy']:.1%} "
           f"({final_stats['matches']}/{final_stats['total']})")
     print(f"  Close misses: {final_stats.get('close_misses', 0)}")
     print(f"  Far misses: {final_stats.get('far_misses', 0)}")
 
     # Compare against default config
-    default_stats = run_single(
-        ClassificationConfig(), game_files, args.elo, args.stockfish, args.depth, args.multipv, engine_tag,
-        nodes=nodes,
-    )
+    default_stats = evaluator.evaluate(ClassificationConfig(), include_breakdown=True)
     if default_stats["total"] > 0:
         delta = final_stats["accuracy"] - default_stats["accuracy"]
         print(f"\n  vs default config: {default_stats['accuracy']:.1%} -> {final_stats['accuracy']:.1%} "
