@@ -142,7 +142,10 @@ def detect_brilliant(
     c = config or ClassificationConfig()
 
     # Elo-dependent thresholds
-    max_win_before = 0.90 if (elo is not None and elo < 1500) else c.brilliant_max_win_pct_before
+    if elo is not None and elo < c.brilliant_low_elo_max_win_pct_threshold:
+        max_win_before = c.brilliant_low_elo_max_win_pct_before
+    else:
+        max_win_before = c.brilliant_max_win_pct_before
 
     # Condition 1: move is best or near-best
     if ep_loss > c.brilliant_ep_tolerance:
@@ -270,13 +273,18 @@ def detect_great(
 
     # Filter: in already heavily-won positions, finding the "best" move is
     # less impressive — chess.com rarely awards "great" when WP > 0.90.
-    if win_pct_before > 0.90 or win_pct_before < 0.10:
+    if win_pct_before > c.great_max_win_pct_before or win_pct_before < c.great_min_win_pct_before:
         return False
 
     # A. Candidate gap: the played move is uniquely strong — all alternatives
     #    are significantly worse. This is the primary "great" signal.
     if candidate_gap_cp is not None and candidate_gap_cp >= c.great_min_candidate_gap_cp:
         return True
+
+    capitalization_gap_cp = max(
+        1,
+        int(round(c.great_min_candidate_gap_cp * c.great_capitalization_gap_scale)),
+    )
 
     # B. Capitalization with gap: opponent made a moderate mistake and the
     #    player found the best response, but only if there's a meaningful gap
@@ -286,7 +294,7 @@ def detect_great(
         if (prev_ep_loss is not None
                 and prev_ep_loss >= c.great_capitalization_min_ep_loss
                 and prev_ep_loss < c.great_capitalization_max_ep_loss
-                and candidate_gap_cp >= c.great_min_candidate_gap_cp // 2):
+                and candidate_gap_cp >= capitalization_gap_cp):
             return True
 
     return False

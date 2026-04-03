@@ -48,7 +48,7 @@ import json
 import shutil
 import sys
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 from itertools import product
 from pathlib import Path
@@ -486,7 +486,38 @@ def _load_cached_engine_results(cache_path: Path) -> tuple:
 # Grid search helpers
 # ---------------------------------------------------------------------------
 
-OptimizationResult = tuple[tuple[float, int], dict, ClassificationConfig]
+OptimizationResult = tuple[tuple, dict, ClassificationConfig]
+
+
+@dataclass(frozen=True)
+class ScoreProfile:
+    key: str
+    label: str
+    class_weights: dict[str, float] | None = None
+
+
+STANDARD_SCORE = ScoreProfile(key="standard", label="Standard")
+WEIGHTED_SCORE = ScoreProfile(
+    key="weighted",
+    label="Weighted",
+    class_weights={
+        # Keep core labels balanced, but give contextual/special labels a bit
+        # more influence without letting the single "brilliant" sample dominate.
+        "best": 1.0,
+        "excellent": 1.0,
+        "good": 1.0,
+        "inaccuracy": 1.0,
+        "mistake": 1.0,
+        "blunder": 1.0,
+        "great": 2.0,
+        "miss": 2.0,
+        "brilliant": 1.5,
+    },
+)
+SCORE_PROFILES = {
+    STANDARD_SCORE.key: STANDARD_SCORE,
+    WEIGHTED_SCORE.key: WEIGHTED_SCORE,
+}
 
 
 def _config_key(config: ClassificationConfig) -> tuple:
@@ -494,15 +525,49 @@ def _config_key(config: ClassificationConfig) -> tuple:
     return tuple(asdict(config).items())
 
 
-def _score_stats(stats: dict) -> tuple[float, int]:
-    """Primary optimization score: maximize accuracy, then minimize far misses."""
-    return (stats["accuracy"], -stats.get("far_misses", 0))
+def _weighted_class_recall(stats: dict, class_weights: dict[str, float]) -> float:
+    """Weighted mean per-class recall, to avoid majority classes dominating."""
+    by_class = stats.get("by_class", {})
+    weighted_total = 0.0
+    weighted_hits = 0.0
+    for cls, info in by_class.items():
+        total = info.get("total", 0)
+        if total <= 0:
+            continue
+        weight = class_weights.get(cls, 1.0)
+        weighted_total += weight
+        weighted_hits += weight * (info.get("matched", 0) / total)
+    return weighted_hits / weighted_total if weighted_total else 0.0
 
 
-def _format_score(score: tuple[float, int] | None) -> str:
+def _score_stats(stats: dict, profile: ScoreProfile = STANDARD_SCORE) -> tuple:
+    """Return a sortable score tuple for the requested optimization objective."""
+    if profile.class_weights is None:
+        return (stats["accuracy"], -stats.get("far_misses", 0))
+
+    weighted_recall = _weighted_class_recall(stats, profile.class_weights)
+    return (
+        weighted_recall,
+        stats["accuracy"],
+        -stats.get("far_misses", 0),
+    )
+
+
+def _format_score(score: tuple | None, profile: ScoreProfile = STANDARD_SCORE) -> str:
     if score is None:
         return "n/a"
-    return f"{score[0]:.1%}, far={-score[1]}"
+    if profile.class_weights is None:
+        return f"acc={score[0]:.1%}, far={-score[1]}"
+    return f"wrecall={score[0]:.1%}, acc={score[1]:.1%}, far={-score[2]}"
+
+
+def _describe_stats(stats: dict, profile: ScoreProfile = STANDARD_SCORE) -> str:
+    if profile.class_weights is None:
+        return f"acc={stats['accuracy']:.1%}, far={stats.get('far_misses', 0)}"
+    return (
+        f"wrecall={_weighted_class_recall(stats, profile.class_weights):.1%}, "
+        f"acc={stats['accuracy']:.1%}, far={stats.get('far_misses', 0)}"
+    )
 
 
 def _print_sweep_progress(
@@ -510,13 +575,14 @@ def _print_sweep_progress(
     done: int,
     total: int,
     started_at: float,
-    best_score: tuple[float, int] | None = None,
+    best_score: tuple | None = None,
+    profile: ScoreProfile = STANDARD_SCORE,
 ) -> None:
     """Print a one-line progress update with ETA and current best score."""
     elapsed = max(0.001, time.time() - started_at)
     rate = done / elapsed
     eta = (total - done) / rate if rate > 0 else 0.0
-    best_str = f", best={_format_score(best_score)}" if best_score is not None else ""
+    best_str = f", best={_format_score(best_score, profile)}" if best_score is not None else ""
     print(
         f"    {label}: {done}/{total} ({done / total:.0%}), "
         f"elapsed={elapsed:.1f}s, eta={eta:.1f}s{best_str}",
@@ -539,9 +605,15 @@ def _is_valid_phase3_config(config: ClassificationConfig) -> bool:
         and 0 < config.ep_excellent < config.ep_good < config.ep_inaccuracy < config.ep_mistake
         and config.great_min_candidate_gap_cp >= 50
         and config.best_promotion_min_gap_cp >= 5
+        and config.great_capitalization_min_ep_loss >= 0.02
+        and config.great_capitalization_min_ep_loss < config.great_capitalization_max_ep_loss
+        and 0.2 <= config.great_capitalization_gap_scale <= 1.0
+        and 0.0 < config.great_min_win_pct_before < config.great_max_win_pct_before < 1.0
         and config.miss_opponent_ep_loss_threshold >= 0.04
         and config.miss_min_ep_loss >= 0.04
         and config.ep_excellent_low_elo > 0
+        and 0.6 <= config.brilliant_low_elo_max_win_pct_before <= 0.98
+        and 600 <= config.elo_scale_midpoint <= 2200
     )
 
 
@@ -683,20 +755,26 @@ def run_single(
 
 def phase1_sigmoid_sweep(
     evaluator: OptimizerRunner,
+    profile: ScoreProfile = STANDARD_SCORE,
 ) -> list[OptimizationResult]:
     """Sweep sigmoid parameters with default thresholds."""
     floors = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
     ranges = [0.2, 0.3, 0.4, 0.5, 0.6]
     steepnesses = [0.003, 0.005, 0.008]
+    midpoints = [1000.0, 1250.0, 1500.0, 1750.0]
 
     results = []
     base = ClassificationConfig()
-    total = sum(1 for f, r, s in product(floors, ranges, steepnesses) if f + r <= 1.05)
+    total = sum(
+        1
+        for f, r, s, m in product(floors, ranges, steepnesses, midpoints)
+        if f + r <= 1.05
+    )
     done = 0
     started_at = time.time()
     best_score = None
 
-    for floor, range_, steep in product(floors, ranges, steepnesses):
+    for floor, range_, steep, midpoint in product(floors, ranges, steepnesses, midpoints):
         if floor + range_ > 1.05:
             continue
         done += 1
@@ -705,17 +783,20 @@ def phase1_sigmoid_sweep(
             elo_scale_floor=floor,
             elo_scale_range=range_,
             elo_scale_steepness=steep,
+            elo_scale_midpoint=midpoint,
         )
         stats = evaluator.evaluate(config)
         if stats["total"] == 0:
             continue
-        score = _score_stats(stats)
+        score = _score_stats(stats, profile)
         results.append((score, stats, config))
         if best_score is None or score > best_score:
             best_score = score
 
         if done % 10 == 0 or done == total:
-            _print_sweep_progress("phase 1", done, total, started_at, best_score)
+            _print_sweep_progress(
+                f"phase 1 ({profile.key})", done, total, started_at, best_score, profile
+            )
 
     results.sort(key=lambda x: x[0], reverse=True)
     return results
@@ -724,6 +805,7 @@ def phase1_sigmoid_sweep(
 def phase2_threshold_sweep(
     best_sigmoid: ClassificationConfig,
     evaluator: OptimizerRunner,
+    profile: ScoreProfile = STANDARD_SCORE,
 ) -> list[OptimizationResult]:
     """Sweep EP thresholds and candidate gap with fixed sigmoid parameters."""
     excellents = [0.005, 0.01, 0.015, 0.02, 0.025]
@@ -756,13 +838,15 @@ def phase2_threshold_sweep(
         stats = evaluator.evaluate(config)
         if stats["total"] == 0:
             continue
-        score = _score_stats(stats)
+        score = _score_stats(stats, profile)
         results.append((score, stats, config))
         if best_score is None or score > best_score:
             best_score = score
 
         if done % 50 == 0 or done == total:
-            _print_sweep_progress("phase 2", done, total, started_at, best_score)
+            _print_sweep_progress(
+                f"phase 2 ({profile.key})", done, total, started_at, best_score, profile
+            )
 
     results.sort(key=lambda x: x[0], reverse=True)
     return results
@@ -771,6 +855,7 @@ def phase2_threshold_sweep(
 def phase2b_special_sweep(
     best_config: ClassificationConfig,
     evaluator: OptimizerRunner,
+    profile: ScoreProfile = STANDARD_SCORE,
 ) -> list[OptimizationResult]:
     """Sweep miss, best-promotion, and Elo-dependent excellent parameters."""
     miss_opp_thresholds = [0.04, 0.06, 0.08, 0.10, 0.15]
@@ -802,13 +887,15 @@ def phase2b_special_sweep(
         stats = evaluator.evaluate(config)
         if stats["total"] == 0:
             continue
-        score = _score_stats(stats)
+        score = _score_stats(stats, profile)
         results.append((score, stats, config))
         if best_score is None or score > best_score:
             best_score = score
 
         if done % 100 == 0 or done == total:
-            _print_sweep_progress("phase 2b", done, total, started_at, best_score)
+            _print_sweep_progress(
+                f"phase 2b ({profile.key})", done, total, started_at, best_score, profile
+            )
 
     results.sort(key=lambda x: x[0], reverse=True)
     return results
@@ -817,6 +904,7 @@ def phase2b_special_sweep(
 def phase3_fine_tune(
     best_config: ClassificationConfig,
     evaluator: OptimizerRunner,
+    profile: ScoreProfile = STANDARD_SCORE,
     seed_configs: list[ClassificationConfig] | None = None,
     beam_width: int = 4,
     rounds: int = 3,
@@ -835,42 +923,63 @@ def phase3_fine_tune(
         {
             "elo_scale_floor": (-0.05, 0.05),
             "elo_scale_range": (-0.05, 0.05),
+            "elo_scale_midpoint": (-200, 200),
             "ep_excellent": (-0.005, 0.005),
             "ep_good": (-0.005, 0.005),
             "ep_inaccuracy": (-0.01, 0.01),
             "ep_mistake": (-0.02, 0.02),
             "great_min_candidate_gap_cp": (-25, 25),
+            "great_capitalization_min_ep_loss": (-0.02, 0.02),
+            "great_capitalization_max_ep_loss": (-0.03, 0.03),
+            "great_capitalization_gap_scale": (-0.15, 0.15),
+            "great_min_win_pct_before": (-0.05, 0.05),
+            "great_max_win_pct_before": (-0.05, 0.05),
             "best_promotion_min_gap_cp": (-10, 10),
             "miss_opponent_ep_loss_threshold": (-0.02, 0.02),
             "miss_min_ep_loss": (-0.03, 0.03),
+            "brilliant_low_elo_max_win_pct_before": (-0.05, 0.05),
             "ep_excellent_low_elo": (-0.002, 0.002),
             "excellent_elo_threshold": (-200, 200),
         },
         {
             "elo_scale_floor": (-0.02, 0.02),
             "elo_scale_range": (-0.02, 0.02),
+            "elo_scale_midpoint": (-100, 100),
             "ep_excellent": (-0.002, 0.002),
             "ep_good": (-0.002, 0.002),
             "ep_inaccuracy": (-0.005, 0.005),
             "ep_mistake": (-0.01, 0.01),
             "great_min_candidate_gap_cp": (-10, 10),
+            "great_capitalization_min_ep_loss": (-0.01, 0.01),
+            "great_capitalization_max_ep_loss": (-0.015, 0.015),
+            "great_capitalization_gap_scale": (-0.08, 0.08),
+            "great_min_win_pct_before": (-0.03, 0.03),
+            "great_max_win_pct_before": (-0.03, 0.03),
             "best_promotion_min_gap_cp": (-5, 5),
             "miss_opponent_ep_loss_threshold": (-0.01, 0.01),
             "miss_min_ep_loss": (-0.015, 0.015),
+            "brilliant_low_elo_max_win_pct_before": (-0.03, 0.03),
             "ep_excellent_low_elo": (-0.001, 0.001),
             "excellent_elo_threshold": (-100, 100),
         },
         {
             "elo_scale_floor": (-0.01, 0.01),
             "elo_scale_range": (-0.01, 0.01),
+            "elo_scale_midpoint": (-50, 50),
             "ep_excellent": (-0.001, 0.001),
             "ep_good": (-0.001, 0.001),
             "ep_inaccuracy": (-0.003, 0.003),
             "ep_mistake": (-0.005, 0.005),
             "great_min_candidate_gap_cp": (-5, 5),
+            "great_capitalization_min_ep_loss": (-0.005, 0.005),
+            "great_capitalization_max_ep_loss": (-0.01, 0.01),
+            "great_capitalization_gap_scale": (-0.04, 0.04),
+            "great_min_win_pct_before": (-0.015, 0.015),
+            "great_max_win_pct_before": (-0.015, 0.015),
             "best_promotion_min_gap_cp": (-2, 2),
             "miss_opponent_ep_loss_threshold": (-0.005, 0.005),
             "miss_min_ep_loss": (-0.01, 0.01),
+            "brilliant_low_elo_max_win_pct_before": (-0.015, 0.015),
             "ep_excellent_low_elo": (-0.0005, 0.0005),
             "excellent_elo_threshold": (-50, 50),
         },
@@ -883,11 +992,18 @@ def phase3_fine_tune(
         stats = evaluator.evaluate(config)
         if stats["total"] == 0:
             continue
-        score = _score_stats(stats)
+        score = _score_stats(stats, profile)
         results.append((score, stats, config))
         if baseline_best is None or score > baseline_best:
             baseline_best = score
-        _print_sweep_progress("phase 3 seeds", idx, len(seed_configs), baseline_start, baseline_best)
+        _print_sweep_progress(
+            f"phase 3 seeds ({profile.key})",
+            idx,
+            len(seed_configs),
+            baseline_start,
+            baseline_best,
+            profile,
+        )
 
     if not results:
         return []
@@ -929,17 +1045,18 @@ def phase3_fine_tune(
             stats = evaluator.evaluate(candidate)
             if stats["total"] == 0:
                 continue
-            score = _score_stats(stats)
+            score = _score_stats(stats, profile)
             results.append((score, stats, candidate))
             if score > round_best:
                 round_best = score
             if done % 25 == 0 or done == total:
                 _print_sweep_progress(
-                    f"phase 3 round {round_idx}",
+                    f"phase 3 round {round_idx} ({profile.key})",
                     done,
                     total,
                     started_at,
                     round_best,
+                    profile,
                 )
 
         results.sort(key=lambda x: x[0], reverse=True)
@@ -948,9 +1065,8 @@ def phase3_fine_tune(
         improved = "improved" if current_best[0] > best_score else "held"
         best_score = current_best[0]
         print(
-            f"    phase 3 round {round_idx} {improved}: "
-            f"{current_best[1]['accuracy']:.1%} accuracy, "
-            f"{current_best[1].get('far_misses', 0)} far misses "
+            f"    phase 3 round {round_idx} ({profile.key}) {improved}: "
+            f"{_describe_stats(current_best[1], profile)} "
             f"(beam={len(beam)}, candidates={len(frontier)})"
         )
 
@@ -1082,24 +1198,26 @@ def print_results(
     results: list[OptimizationResult],
     top_n: int = 10,
     evaluator: OptimizerRunner | None = None,
+    profile: ScoreProfile = STANDARD_SCORE,
 ):
     print(f"\n{'='*80}")
     print(f" {title} -- Top {min(top_n, len(results))} of {len(results)} runs")
     print(f"{'='*80}")
     for i, (score, stats, config) in enumerate(results[:top_n]):
-        if evaluator is not None and "by_class" not in stats:
+        if evaluator is not None and (
+            "by_class" not in stats
+            or any("our_labels" not in info for info in stats.get("by_class", {}).values())
+        ):
             stats = evaluator.evaluate(config, include_breakdown=True)
-        acc = stats["accuracy"]
-        fm = stats.get("far_misses", "?")
-        cm = stats.get("close_misses", "?")
         print(
-            f"\n  #{i+1}  Accuracy: {acc:.1%}  "
-            f"(far_misses={fm}, close_misses={cm})"
+            f"\n  #{i+1}  Score: {_format_score(score, profile)}  "
+            f"(close_misses={stats.get('close_misses', '?')})"
         )
         print(
             f"       sigmoid: floor={config.elo_scale_floor:.2f}, "
             f"range={config.elo_scale_range:.2f}, "
-            f"steepness={config.elo_scale_steepness:.4f}"
+            f"steepness={config.elo_scale_steepness:.4f}, "
+            f"midpoint={config.elo_scale_midpoint:.0f}"
         )
         print(
             f"       thresholds: excellent<={config.ep_excellent:.3f}, "
@@ -1107,12 +1225,28 @@ def print_results(
             f"inaccuracy<{config.ep_inaccuracy:.3f}, "
             f"mistake<{config.ep_mistake:.3f}"
         )
+        print(
+            f"       specials: best_gap>={config.best_promotion_min_gap_cp}, "
+            f"great_gap>={config.great_min_candidate_gap_cp}, "
+            f"great_cap=[{config.great_capitalization_min_ep_loss:.3f}, "
+            f"{config.great_capitalization_max_ep_loss:.3f}), "
+            f"great_cap_gap_scale={config.great_capitalization_gap_scale:.2f}"
+        )
+        print(
+            f"       filters: great_wp_before=[{config.great_min_win_pct_before:.2f}, "
+            f"{config.great_max_win_pct_before:.2f}], "
+            f"brilliant_low_elo_max_wp={config.brilliant_low_elo_max_win_pct_before:.2f}"
+        )
         by_class = stats.get("by_class", {})
         for cls in sorted(by_class, key=lambda x: by_class[x]["total"], reverse=True):
             info = by_class[cls]
             rate = info["matched"] / info["total"] if info["total"] else 0
-            labels = ", ".join(f"{k}={v}" for k, v in sorted(info["our_labels"].items()))
-            print(f"         {cls:<12} {info['matched']}/{info['total']} ({rate:.0%})  -> {labels}")
+            labels = info.get("our_labels")
+            if labels:
+                label_text = ", ".join(f"{k}={v}" for k, v in sorted(labels.items()))
+                print(f"         {cls:<12} {info['matched']}/{info['total']} ({rate:.0%})  -> {label_text}")
+            else:
+                print(f"         {cls:<12} {info['matched']}/{info['total']} ({rate:.0%})")
 
 
 def print_engine_sweep_results(results: list[dict]):
@@ -1184,16 +1318,24 @@ def print_config_as_python(config: ClassificationConfig, label: str = "Best conf
     print(f"    elo_scale_floor     = {config.elo_scale_floor}")
     print(f"    elo_scale_range     = {config.elo_scale_range}")
     print(f"    elo_scale_steepness = {config.elo_scale_steepness}")
+    print(f"    elo_scale_midpoint  = {config.elo_scale_midpoint}")
     print(f"    ep_excellent        = {config.ep_excellent}")
     print(f"    ep_good             = {config.ep_good}")
     print(f"    ep_inaccuracy       = {config.ep_inaccuracy}")
     print(f"    ep_mistake          = {config.ep_mistake}")
     print(f"    great_min_candidate_gap_cp = {config.great_min_candidate_gap_cp}")
+    print(f"    great_capitalization_min_ep_loss = {config.great_capitalization_min_ep_loss}")
+    print(f"    great_capitalization_max_ep_loss = {config.great_capitalization_max_ep_loss}")
+    print(f"    great_capitalization_gap_scale = {config.great_capitalization_gap_scale}")
+    print(f"    great_min_win_pct_before = {config.great_min_win_pct_before}")
+    print(f"    great_max_win_pct_before = {config.great_max_win_pct_before}")
     print(f"    best_promotion_min_gap_cp = {config.best_promotion_min_gap_cp}")
     print(f"    excellent_elo_threshold   = {config.excellent_elo_threshold}")
     print(f"    ep_excellent_low_elo      = {config.ep_excellent_low_elo}")
     print(f"    miss_opponent_ep_loss_threshold = {config.miss_opponent_ep_loss_threshold}")
     print(f"    miss_min_ep_loss = {config.miss_min_ep_loss}")
+    print(f"    brilliant_low_elo_max_win_pct_before = {config.brilliant_low_elo_max_win_pct_before}")
+    print(f"    brilliant_low_elo_max_win_pct_threshold = {config.brilliant_low_elo_max_win_pct_threshold}")
 
 
 # ---------------------------------------------------------------------------
@@ -1344,6 +1486,10 @@ def cmd_optimize(args):
         engine_tag=engine_tag,
         nodes=nodes,
     )
+    if args.score_mode == "both":
+        score_profiles = [STANDARD_SCORE, WEIGHTED_SCORE]
+    else:
+        score_profiles = [SCORE_PROFILES[args.score_mode]]
     mode = "Stockfish (cached)" if args.stockfish else "Mock (chess.com evals)"
     print(f"\nMode: {mode}")
     if args.stockfish:
@@ -1378,70 +1524,119 @@ def cmd_optimize(args):
                       f"--engine {engine_tag} --depth {args.depth} --multipv {args.multipv}")
 
     start = time.time()
+    profile_summaries = []
 
-    # --- Phase 1: Sigmoid sweep ---
-    print("\n[Phase 1] Sweeping sigmoid parameters (default thresholds)...")
-    p1 = phase1_sigmoid_sweep(evaluator)
-    if not p1:
-        print("No results -- check that game files and caches exist.")
-        return
-    print_results("Phase 1: Sigmoid Sweep", p1, top_n=5, evaluator=evaluator)
-    best_sigmoid = p1[0][2]
+    for profile in score_profiles:
+        print(f"\n{'='*80}")
+        print(f" OPTIMIZING FOR {profile.label.upper()} SCORE")
+        print(f"{'='*80}")
 
-    # --- Phase 2: Threshold sweep ---
-    print(f"\n[Phase 2] Sweeping EP thresholds (best sigmoid: "
-          f"floor={best_sigmoid.elo_scale_floor}, range={best_sigmoid.elo_scale_range}, "
-          f"steep={best_sigmoid.elo_scale_steepness})...")
-    p2 = phase2_threshold_sweep(best_sigmoid, evaluator)
-    if not p2:
-        print("No threshold results.")
-        return
-    print_results("Phase 2: Threshold Sweep", p2, top_n=5, evaluator=evaluator)
-    best_combined = p2[0][2]
+        # --- Phase 1: Sigmoid sweep ---
+        print(f"\n[Phase 1/{profile.key}] Sweeping sigmoid parameters...")
+        p1 = phase1_sigmoid_sweep(evaluator, profile)
+        if not p1:
+            print("No results -- check that game files and caches exist.")
+            return
+        print_results(
+            f"Phase 1: Sigmoid Sweep ({profile.label})",
+            p1,
+            top_n=5,
+            evaluator=evaluator,
+            profile=profile,
+        )
+        best_sigmoid = p1[0][2]
 
-    # --- Phase 2b: Special parameter sweep (miss, best-promotion, low-Elo excellent) ---
-    print(f"\n[Phase 2b] Sweeping special classification parameters...")
-    p2b = phase2b_special_sweep(best_combined, evaluator)
-    if p2b:
-        print_results("Phase 2b: Special Sweep", p2b, top_n=5, evaluator=evaluator)
-        best_combined = p2b[0][2]
+        # --- Phase 2: Threshold sweep ---
+        print(
+            f"\n[Phase 2/{profile.key}] Sweeping EP thresholds "
+            f"(best sigmoid midpoint={best_sigmoid.elo_scale_midpoint:.0f})..."
+        )
+        p2 = phase2_threshold_sweep(best_sigmoid, evaluator, profile)
+        if not p2:
+            print("No threshold results.")
+            return
+        print_results(
+            f"Phase 2: Threshold Sweep ({profile.label})",
+            p2,
+            top_n=5,
+            evaluator=evaluator,
+            profile=profile,
+        )
+        best_combined = p2[0][2]
 
-    # --- Phase 3: Fine-tune ---
-    phase3_seeds = [config for _, _, config in p2[:3]]
-    if p2b:
-        phase3_seeds.extend(config for _, _, config in p2b[:3])
-    print(f"\n[Phase 3] Local fine-tuning from {len(_unique_configs(phase3_seeds))} strong seeds...")
-    p3 = phase3_fine_tune(
-        best_combined,
-        evaluator,
-        seed_configs=phase3_seeds,
-    )
-    if not p3:
-        print("No fine-tune results.")
-        return
-    print_results("Phase 3: Fine-Tuning", p3, top_n=5, evaluator=evaluator)
-    best_final = p3[0][2]
+        # --- Phase 2b: Special parameter sweep ---
+        print(f"\n[Phase 2b/{profile.key}] Sweeping special classification parameters...")
+        p2b = phase2b_special_sweep(best_combined, evaluator, profile)
+        if p2b:
+            print_results(
+                f"Phase 2b: Special Sweep ({profile.label})",
+                p2b,
+                top_n=5,
+                evaluator=evaluator,
+                profile=profile,
+            )
+            best_combined = p2b[0][2]
 
-    # --- Summary ---
+        # --- Phase 3: Fine-tune ---
+        phase3_seeds = [config for _, _, config in p2[:3]]
+        if p2b:
+            phase3_seeds.extend(config for _, _, config in p2b[:3])
+        print(
+            f"\n[Phase 3/{profile.key}] Local fine-tuning from "
+            f"{len(_unique_configs(phase3_seeds))} strong seeds..."
+        )
+        p3 = phase3_fine_tune(
+            best_combined,
+            evaluator,
+            profile,
+            seed_configs=phase3_seeds,
+        )
+        if not p3:
+            print("No fine-tune results.")
+            return
+        print_results(
+            f"Phase 3: Fine-Tuning ({profile.label})",
+            p3,
+            top_n=5,
+            evaluator=evaluator,
+            profile=profile,
+        )
+        best_final = p3[0][2]
+
+        final_stats = evaluator.evaluate(best_final, include_breakdown=True)
+        default_stats = evaluator.evaluate(ClassificationConfig(), include_breakdown=True)
+        delta = final_stats["accuracy"] - default_stats["accuracy"] if default_stats["total"] > 0 else 0.0
+
+        print(f"\n  {profile.label} best config:")
+        print_config_as_python(best_final, label=f"{profile.label} best config")
+        print(f"\n  Final metrics: {_describe_stats(final_stats, profile)}")
+        print(f"  Exact matches: {final_stats['matches']}/{final_stats['total']}")
+        print(f"  Close misses: {final_stats.get('close_misses', 0)}")
+        print(f"  Far misses: {final_stats.get('far_misses', 0)}")
+        if default_stats["total"] > 0:
+            print(
+                f"  vs default exact accuracy: "
+                f"{default_stats['accuracy']:.1%} -> {final_stats['accuracy']:.1%} ({delta:+.1%})"
+            )
+
+        profile_summaries.append({
+            "profile": profile,
+            "config": best_final,
+            "stats": final_stats,
+            "delta": delta,
+        })
+
     elapsed = time.time() - start
     print(f"\n{'='*80}")
     print(f" FINAL RESULT -- {evaluator.unique_evaluations} unique configs in {elapsed:.1f}s")
     print(f"{'='*80}")
-    print_config_as_python(best_final)
-
-    # Run final comparison for detail
-    final_stats = evaluator.evaluate(best_final, include_breakdown=True)
-    print(f"\n  Accuracy: {final_stats['accuracy']:.1%} "
-          f"({final_stats['matches']}/{final_stats['total']})")
-    print(f"  Close misses: {final_stats.get('close_misses', 0)}")
-    print(f"  Far misses: {final_stats.get('far_misses', 0)}")
-
-    # Compare against default config
-    default_stats = evaluator.evaluate(ClassificationConfig(), include_breakdown=True)
-    if default_stats["total"] > 0:
-        delta = final_stats["accuracy"] - default_stats["accuracy"]
-        print(f"\n  vs default config: {default_stats['accuracy']:.1%} -> {final_stats['accuracy']:.1%} "
-              f"({delta:+.1%})")
+    for summary in profile_summaries:
+        profile = summary["profile"]
+        stats = summary["stats"]
+        print(
+            f"  {profile.label:<8} {_describe_stats(stats, profile)}  "
+            f"delta_exact={summary['delta']:+.1%}"
+        )
     print()
 
 
@@ -1536,6 +1731,13 @@ multi-PV 2-3, Expected Points classification with Elo-adjusted sigmoid.
     parser.add_argument(
         "--elo", type=int, default=820,
         help="Player Elo for classification (default: 820)",
+    )
+    parser.add_argument(
+        "--score-mode",
+        type=str,
+        choices=["standard", "weighted", "both"],
+        default="both",
+        help="Optimization objective: standard accuracy, weighted per-class recall, or both (default: both)",
     )
 
     # Engine sweep options
