@@ -404,6 +404,31 @@ class TestBrilliantDetection:
         )
         assert result is False  # ep_loss > 0.02 tolerance
 
+    def test_brilliant_respects_configured_low_elo_win_before_cap(self):
+        """Lower-Elo brilliant filter should use the config, not a hard-coded 0.90."""
+        board_before = chess.Board("r1b1k2r/pppp1ppp/2n2n2/2b1Q3/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 0 1")
+        board_after = chess.Board("r1b1k2r/pppp1ppp/2n2n2/2b5/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 1")
+        move = list(board_before.legal_moves)[0]
+        config = ClassificationConfig(
+            brilliant_low_elo_max_win_pct_before=0.80,
+            brilliant_low_elo_max_win_pct_threshold=1500,
+        )
+
+        result = detect_brilliant(
+            board_before=board_before,
+            board_after=board_after,
+            move=move,
+            ep_loss=0.0,
+            win_pct_before=0.85,
+            win_pct_after=0.70,
+            best_pv=[],
+            best_mate_in=None,
+            side=chess.WHITE,
+            elo=1400,
+            config=config,
+        )
+        assert result is False
+
 
 class TestPVCheckmate:
     def test_detects_mate_in_pv(self):
@@ -430,6 +455,23 @@ class TestPVCheckmate:
 # ===========================================================================
 
 class TestGreatMoveDetection:
+    def _make_prev_context(self, ep_loss: float) -> AssembledContext:
+        board = chess.Board()
+        move = list(board.legal_moves)[0]
+        return AssembledContext(
+            fen=board.fen(),
+            played_move=move,
+            played_move_san="e4",
+            best_move=move,
+            best_move_san="e4",
+            best_move_cp=30,
+            mate_in=None,
+            played_move_cp_loss=0,
+            cp_loss_label="best",
+            pv_san=["e4"],
+            ep_loss=ep_loss,
+        )
+
     def test_turning_move(self):
         """Position swings from losing to equal → great move."""
         provider = SigmoidWDLProvider()
@@ -513,6 +555,61 @@ class TestGreatMoveDetection:
             elo=2000,
         )
         assert result is False
+
+    def test_great_respects_configured_win_pct_filter(self):
+        """Great should obey the configured pre-move win-probability filter."""
+        provider = SigmoidWDLProvider()
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        candidates = [
+            CandidateMove(move=moves[0], score_cp=300, mate_in=None, pv=[moves[0]]),
+            CandidateMove(move=moves[1], score_cp=0, mate_in=None, pv=[moves[1]]),
+        ]
+        config = ClassificationConfig(great_max_win_pct_before=0.80)
+
+        result = detect_great(
+            ep_loss=0.0,
+            win_pct_before=0.85,
+            win_pct_after=0.92,
+            candidates=candidates,
+            provider=provider,
+            board=board,
+            move=moves[0],
+            elo=1500,
+            config=config,
+            is_engine_top=True,
+            candidate_gap_cp=300,
+        )
+        assert result is False
+
+    def test_great_respects_configured_capitalization_gap_scale(self):
+        """Capitalization gap threshold should come from config, not hard-coded half-gap."""
+        provider = SigmoidWDLProvider()
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        config = ClassificationConfig(
+            great_min_candidate_gap_cp=200,
+            great_capitalization_gap_scale=0.40,
+        )
+
+        result = detect_great(
+            ep_loss=0.0,
+            win_pct_before=0.50,
+            win_pct_after=0.65,
+            candidates=[
+                CandidateMove(move=moves[0], score_cp=100, mate_in=None, pv=[moves[0]]),
+                CandidateMove(move=moves[1], score_cp=10, mate_in=None, pv=[moves[1]]),
+            ],
+            provider=provider,
+            board=board,
+            move=moves[0],
+            elo=1500,
+            config=config,
+            prev_context=self._make_prev_context(0.10),
+            is_engine_top=True,
+            candidate_gap_cp=90,
+        )
+        assert result is True
 
 
 # ===========================================================================

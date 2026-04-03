@@ -544,18 +544,21 @@ def compute_accuracy_stats(
     include_breakdown: bool = True,
 ) -> dict:
     """Compute summary accuracy statistics."""
-    # Exclude book moves from accuracy calculation (we don't have a book classifier)
-    non_book = [c for c in comparisons if c.chesscom_class != "book"]
-    if not non_book:
+    # Exclude labels we cannot meaningfully optimize against.
+    comparable = [
+        c for c in comparisons
+        if c.chesscom_class and c.chesscom_class != "book"
+    ]
+    if not comparable:
         return {"total": 0, "matches": 0, "accuracy": 0.0}
 
-    matches = sum(1 for c in non_book if c.match)
-    total = len(non_book)
+    matches = sum(1 for c in comparable if c.match)
+    total = len(comparable)
 
     # Count by severity distance
     close_misses = 0  # off by 1 severity level
     far_misses = 0    # off by 2+ severity levels
-    for c in non_book:
+    for c in comparable:
         if not c.match:
             s1 = CLASS_SEVERITY.get(c.chesscom_class, 10)
             s2 = CLASS_SEVERITY.get(c.our_class, 10)
@@ -564,30 +567,29 @@ def compute_accuracy_stats(
             else:
                 far_misses += 1
 
+    by_class: dict[str, dict] = {}
+    for c in comparable:
+        cc = c.chesscom_class
+        if cc not in by_class:
+            by_class[cc] = {"total": 0, "matched": 0}
+            if include_breakdown:
+                by_class[cc]["our_labels"] = {}
+        by_class[cc]["total"] += 1
+        if c.match:
+            by_class[cc]["matched"] += 1
+        if include_breakdown:
+            our = c.our_class
+            labels = by_class[cc]["our_labels"]
+            labels[our] = labels.get(our, 0) + 1
+
     stats = {
         "total": total,
         "matches": matches,
         "accuracy": matches / total,
         "close_misses": close_misses,
         "far_misses": far_misses,
+        "by_class": by_class,
     }
-
-    if not include_breakdown:
-        return stats
-
-    # Breakdown by chess.com classification
-    by_class: dict[str, dict] = {}
-    for c in non_book:
-        cc = c.chesscom_class
-        if cc not in by_class:
-            by_class[cc] = {"total": 0, "matched": 0, "our_labels": {}}
-        by_class[cc]["total"] += 1
-        if c.match:
-            by_class[cc]["matched"] += 1
-        our = c.our_class
-        by_class[cc]["our_labels"][our] = by_class[cc]["our_labels"].get(our, 0) + 1
-
-    stats["by_class"] = by_class
     return stats
 
 
