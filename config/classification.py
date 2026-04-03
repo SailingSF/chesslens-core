@@ -24,14 +24,14 @@ class ClassificationConfig:
     elo_scale_floor: float = 0.80
     elo_scale_range: float = 0.20
     elo_scale_steepness: float = 0.005
-    elo_scale_midpoint: float = 1500.0
+    elo_scale_midpoint: float = 1700.0
 
     # --- EP thresholds — calibrated against chess.com Classification V2 ---
     ep_best: float = 0.00
     ep_excellent: float = 0.02
-    ep_good: float = 0.045
-    ep_inaccuracy: float = 0.095
-    ep_mistake: float = 0.25
+    ep_good: float = 0.04
+    ep_inaccuracy: float = 0.097
+    ep_mistake: float = 0.26
     # anything above ep_mistake = blunder
 
     # --- Elo-dependent excellent threshold ---
