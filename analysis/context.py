@@ -288,8 +288,18 @@ class ContextAssembler:
                 label = "brilliant"
             elif is_great and label in ("best", "excellent", "good"):
                 label = "great"
-            elif is_miss and label not in ("blunder",):
-                label = "miss"
+            elif is_miss:
+                if label == "blunder":
+                    # Miss overrides blunder only when the opponent's
+                    # previous mistake was very large — the "missed
+                    # opportunity" context is strong enough to override
+                    # the blunder classification.
+                    if (prev_context is not None
+                            and prev_context.ep_loss is not None
+                            and prev_context.ep_loss >= self._config.miss_blunder_override_min_prev_ep):
+                        label = "miss"
+                else:
+                    label = "miss"
 
         # Opening
         eco_code, opening_name = self._eco.lookup(board)
