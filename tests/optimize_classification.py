@@ -598,22 +598,29 @@ def _coerce_param_value(template: int | float, value: int | float) -> int | floa
 
 
 def _is_valid_phase3_config(config: ClassificationConfig) -> bool:
+    # EP thresholds must stay pinned to chess.com published values
+    if not (config.ep_excellent == 0.02 and config.ep_good == 0.05
+            and config.ep_inaccuracy == 0.10 and config.ep_mistake == 0.20):
+        return False
     return (
         config.elo_scale_floor >= 0.1
         and config.elo_scale_range >= 0.1
         and config.elo_scale_floor + config.elo_scale_range <= 1.05
-        and 0 < config.ep_excellent < config.ep_good < config.ep_inaccuracy < config.ep_mistake
         and config.great_min_candidate_gap_cp >= 50
         and config.best_promotion_min_gap_cp >= 5
         and config.great_capitalization_min_ep_loss >= 0.02
         and config.great_capitalization_min_ep_loss < config.great_capitalization_max_ep_loss
         and 0.2 <= config.great_capitalization_gap_scale <= 1.0
         and 0.0 < config.great_min_win_pct_before < config.great_max_win_pct_before < 1.0
-        and config.miss_opponent_ep_loss_threshold >= 0.04
-        and config.miss_min_ep_loss >= 0.04
+        and config.miss_opponent_ep_loss_threshold >= 0.02
+        and config.miss_min_ep_loss >= 0.02
         and config.ep_excellent_low_elo > 0
         and 0.6 <= config.brilliant_low_elo_max_win_pct_before <= 0.98
         and 600 <= config.elo_scale_midpoint <= 2200
+        and config.great_transition_min_gap_cp >= 10
+        and 0.1 <= config.great_defensive_losing_threshold <= 0.5
+        and 0.5 <= config.great_seizing_winning_threshold <= 0.9
+        and 0.3 <= config.miss_best_win_pct_threshold <= 0.95
     )
 
 
@@ -807,33 +814,39 @@ def phase2_threshold_sweep(
     evaluator: OptimizerRunner,
     profile: ScoreProfile = STANDARD_SCORE,
 ) -> list[OptimizationResult]:
-    """Sweep EP thresholds and candidate gap with fixed sigmoid parameters."""
-    excellents = [0.005, 0.01, 0.015, 0.02, 0.025]
-    goods = [0.02, 0.03, 0.04, 0.05, 0.06]
-    inaccuracies = [0.06, 0.07, 0.08, 0.10, 0.12]
-    mistakes = [0.12, 0.15, 0.18, 0.20, 0.22, 0.25]
-    candidate_gaps = [100, 150, 200, 250]
+    """Sweep contextual parameters with EP thresholds fixed at chess.com published values.
 
-    valid_combos = [
-        (e, g, i, m, cg)
-        for e, g, i, m, cg in product(excellents, goods, inaccuracies, mistakes, candidate_gaps)
-        if e < g < i < m
-    ]
-    total = len(valid_combos)
+    EP thresholds are pinned to chess.com's published table and should NOT be tuned.
+    Instead, sweep candidate gap and great move transition parameters.
+    """
+    candidate_gaps = [100, 150, 200, 250]
+    great_transition_gaps = [30, 50, 75, 100]
+    great_defensive_losing = [0.30, 0.35, 0.40]
+    great_seizing_winning = [0.65, 0.70, 0.75]
+
+    combos = list(product(
+        candidate_gaps, great_transition_gaps,
+        great_defensive_losing, great_seizing_winning,
+    ))
+    total = len(combos)
     done = 0
     started_at = time.time()
     best_score = None
 
     results = []
-    for exc, good, inacc, mist, cg in valid_combos:
+    for cg, tg, dl, sw in combos:
         done += 1
         config = replace(
             best_sigmoid,
-            ep_excellent=exc,
-            ep_good=good,
-            ep_inaccuracy=inacc,
-            ep_mistake=mist,
+            # EP thresholds pinned to chess.com published values
+            ep_excellent=0.02,
+            ep_good=0.05,
+            ep_inaccuracy=0.10,
+            ep_mistake=0.20,
             great_min_candidate_gap_cp=cg,
+            great_transition_min_gap_cp=tg,
+            great_defensive_losing_threshold=dl,
+            great_seizing_winning_threshold=sw,
         )
         stats = evaluator.evaluate(config)
         if stats["total"] == 0:
@@ -859,13 +872,14 @@ def phase2b_special_sweep(
 ) -> list[OptimizationResult]:
     """Sweep miss, best-promotion, and Elo-dependent excellent parameters."""
     miss_opp_thresholds = [0.04, 0.06, 0.08, 0.10, 0.15]
-    miss_min_eps = [0.06, 0.10, 0.15, 0.20, 0.30]
+    miss_min_eps = [0.04, 0.06, 0.08, 0.10, 0.15]
+    miss_best_win_pcts = [0.60, 0.65, 0.70, 0.75, 0.80]
     best_gaps = [15, 20, 30, 50, 75]
     excellent_low_elos = [0.004, 0.006, 0.008, 0.010, 0.012]
     excellent_elo_thresholds = [800, 1000, 1200]
 
     combos = list(product(
-        miss_opp_thresholds, miss_min_eps,
+        miss_opp_thresholds, miss_min_eps, miss_best_win_pcts,
         best_gaps, excellent_low_elos, excellent_elo_thresholds,
     ))
     total = len(combos)
@@ -874,12 +888,13 @@ def phase2b_special_sweep(
     best_score = None
 
     results = []
-    for miss_opp, miss_ep, bg, ele, elet in combos:
+    for miss_opp, miss_ep, miss_wp, bg, ele, elet in combos:
         done += 1
         config = replace(
             best_config,
             miss_opponent_ep_loss_threshold=miss_opp,
             miss_min_ep_loss=miss_ep,
+            miss_best_win_pct_threshold=miss_wp,
             best_promotion_min_gap_cp=bg,
             ep_excellent_low_elo=ele,
             excellent_elo_threshold=elet,
@@ -919,24 +934,26 @@ def phase3_fine_tune(
         seed_configs = [best_config]
 
     seed_configs = _unique_configs([best_config, *seed_configs])
+    # EP thresholds are pinned to chess.com published values and excluded from tuning.
+    # Only contextual parameters (great triggers, miss detection, sigmoid) are perturbed.
     step_schedule = [
         {
             "elo_scale_floor": (-0.05, 0.05),
             "elo_scale_range": (-0.05, 0.05),
             "elo_scale_midpoint": (-200, 200),
-            "ep_excellent": (-0.005, 0.005),
-            "ep_good": (-0.005, 0.005),
-            "ep_inaccuracy": (-0.01, 0.01),
-            "ep_mistake": (-0.02, 0.02),
             "great_min_candidate_gap_cp": (-25, 25),
             "great_capitalization_min_ep_loss": (-0.02, 0.02),
             "great_capitalization_max_ep_loss": (-0.03, 0.03),
             "great_capitalization_gap_scale": (-0.15, 0.15),
             "great_min_win_pct_before": (-0.05, 0.05),
             "great_max_win_pct_before": (-0.05, 0.05),
+            "great_transition_min_gap_cp": (-15, 15),
+            "great_defensive_losing_threshold": (-0.05, 0.05),
+            "great_seizing_winning_threshold": (-0.05, 0.05),
             "best_promotion_min_gap_cp": (-10, 10),
             "miss_opponent_ep_loss_threshold": (-0.02, 0.02),
             "miss_min_ep_loss": (-0.03, 0.03),
+            "miss_best_win_pct_threshold": (-0.05, 0.05),
             "brilliant_low_elo_max_win_pct_before": (-0.05, 0.05),
             "ep_excellent_low_elo": (-0.002, 0.002),
             "excellent_elo_threshold": (-200, 200),
@@ -945,19 +962,19 @@ def phase3_fine_tune(
             "elo_scale_floor": (-0.02, 0.02),
             "elo_scale_range": (-0.02, 0.02),
             "elo_scale_midpoint": (-100, 100),
-            "ep_excellent": (-0.002, 0.002),
-            "ep_good": (-0.002, 0.002),
-            "ep_inaccuracy": (-0.005, 0.005),
-            "ep_mistake": (-0.01, 0.01),
             "great_min_candidate_gap_cp": (-10, 10),
             "great_capitalization_min_ep_loss": (-0.01, 0.01),
             "great_capitalization_max_ep_loss": (-0.015, 0.015),
             "great_capitalization_gap_scale": (-0.08, 0.08),
             "great_min_win_pct_before": (-0.03, 0.03),
             "great_max_win_pct_before": (-0.03, 0.03),
+            "great_transition_min_gap_cp": (-8, 8),
+            "great_defensive_losing_threshold": (-0.03, 0.03),
+            "great_seizing_winning_threshold": (-0.03, 0.03),
             "best_promotion_min_gap_cp": (-5, 5),
             "miss_opponent_ep_loss_threshold": (-0.01, 0.01),
             "miss_min_ep_loss": (-0.015, 0.015),
+            "miss_best_win_pct_threshold": (-0.03, 0.03),
             "brilliant_low_elo_max_win_pct_before": (-0.03, 0.03),
             "ep_excellent_low_elo": (-0.001, 0.001),
             "excellent_elo_threshold": (-100, 100),
@@ -966,19 +983,19 @@ def phase3_fine_tune(
             "elo_scale_floor": (-0.01, 0.01),
             "elo_scale_range": (-0.01, 0.01),
             "elo_scale_midpoint": (-50, 50),
-            "ep_excellent": (-0.001, 0.001),
-            "ep_good": (-0.001, 0.001),
-            "ep_inaccuracy": (-0.003, 0.003),
-            "ep_mistake": (-0.005, 0.005),
             "great_min_candidate_gap_cp": (-5, 5),
             "great_capitalization_min_ep_loss": (-0.005, 0.005),
             "great_capitalization_max_ep_loss": (-0.01, 0.01),
             "great_capitalization_gap_scale": (-0.04, 0.04),
             "great_min_win_pct_before": (-0.015, 0.015),
             "great_max_win_pct_before": (-0.015, 0.015),
+            "great_transition_min_gap_cp": (-4, 4),
+            "great_defensive_losing_threshold": (-0.015, 0.015),
+            "great_seizing_winning_threshold": (-0.015, 0.015),
             "best_promotion_min_gap_cp": (-2, 2),
             "miss_opponent_ep_loss_threshold": (-0.005, 0.005),
             "miss_min_ep_loss": (-0.01, 0.01),
+            "miss_best_win_pct_threshold": (-0.015, 0.015),
             "brilliant_low_elo_max_win_pct_before": (-0.015, 0.015),
             "ep_excellent_low_elo": (-0.0005, 0.0005),
             "excellent_elo_threshold": (-50, 50),

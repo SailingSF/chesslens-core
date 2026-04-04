@@ -141,7 +141,9 @@ def test_cp_loss_with_mate_best_move():
     assembler = ContextAssembler()
     ctx = assembler.assemble(board, result, played_move=moves[1])
     assert ctx.played_move_cp_loss is not None
-    assert ctx.cp_loss_label == "blunder"  # 9970 - 200 = 9770cp loss
+    # Large EP loss but no concrete damage (synthetic starting position),
+    # so the blunder gate demotes to "mistake".
+    assert ctx.cp_loss_label == "mistake"
 
 
 # --- Pawn structure ---

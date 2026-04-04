@@ -27,7 +27,7 @@ from analysis.expected_points import (
 )
 from analysis.patterns import detect_tactics
 from analysis.pawns import analyze_pawns
-from analysis.special_moves import detect_brilliant, detect_great, detect_miss
+from analysis.special_moves import detect_brilliant, detect_great, detect_miss, is_concrete_blunder
 from chess_engine.service import CandidateMove, EngineResult
 from config.classification import ClassificationConfig
 
@@ -232,6 +232,15 @@ class ContextAssembler:
                 # No candidate gap info (single-PV analysis) — promote anyway
                 label = "best"
 
+        # --- Blunder concrete damage gate ---
+        # Chess.com requires blunders to involve material loss or forced mate.
+        # Positional collapses with large EP loss are demoted to "mistake".
+        if label == "blunder" and played_move is not None and played_candidate is not None:
+            board_after_gate = board.copy()
+            board_after_gate.push(played_move)
+            if not is_concrete_blunder(board, board_after_gate, played_move, played_candidate, board.turn, ep_loss=ep_loss_val):
+                label = "mistake"
+
         # --- Special classification checks ---
         is_brilliant = False
         is_great = False
@@ -262,11 +271,12 @@ class ContextAssembler:
                 candidate_gap_cp=candidate_gap_cp,
             )
 
-            # Check Miss (requires previous move context)
+            # Check Miss (requires previous move context + concrete opportunity)
             if prev_context is not None:
                 is_miss = detect_miss(
                     prev_context=prev_context, best_win_pct=best_win_pct,
                     played_win_pct=played_win_pct, ep_loss=ep_loss_val,
+                    best_candidate=best, board_before=board,
                     side=side, elo=player_elo, config=self._config,
                 )
 

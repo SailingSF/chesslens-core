@@ -119,6 +119,71 @@ def _pv_has_checkmate(board: chess.Board, pv: list[chess.Move], max_depth: int =
     return False
 
 
+def is_concrete_blunder(
+    board_before: chess.Board,
+    board_after: chess.Board,
+    move: chess.Move,
+    played_candidate: Optional[CandidateMove],
+    side: chess.Color,
+    ep_loss: Optional[float] = None,
+) -> bool:
+    """
+    Chess.com's blunder requires concrete damage, not just a large EP drop.
+    A move is a concrete blunder if it:
+      1. Allows forced mate (opponent has mate after this move)
+      2. Loses material on the move (hangs a piece, losing trade)
+      3. Leaves material hanging (opponent can capture and gain material)
+      4. Has an extremely large EP loss (>= 0.35) — tactical combinations that
+         take 2-3 moves to win material are beyond our shallow analysis, but
+         nearly always involve concrete damage at this magnitude
+
+    If none of these hold, the move is a positional collapse — still bad,
+    but classified as "mistake" rather than "blunder".
+    """
+    # Gate 1: allows forced mate
+    if played_candidate is not None and played_candidate.mate_in is not None:
+        if played_candidate.mate_in < 0:
+            return True
+
+    # Gate 2: loses material on the move itself
+    mat_before = _material_balance(board_before, side)
+    mat_after = _material_balance(board_after, side)
+    opp_mat_before = _material_balance(board_before, not side)
+    opp_mat_after = _material_balance(board_after, not side)
+
+    # Net material swing: if our relative material dropped, we lost something
+    net_before = mat_before - opp_mat_before
+    net_after = mat_after - opp_mat_after
+    if net_after < net_before:
+        return True
+
+    # Gate 3: leaves material hanging — opponent has a capture that gains material
+    for opp_move in board_after.legal_moves:
+        if not board_after.is_capture(opp_move):
+            continue
+        captured_piece = board_after.piece_at(opp_move.to_square)
+        if captured_piece is None:
+            # en passant
+            if board_after.is_en_passant(opp_move):
+                return True
+            continue
+        captured_value = PIECE_VALUES.get(captured_piece.piece_type, 0)
+        attacker = board_after.piece_at(opp_move.from_square)
+        attacker_value = PIECE_VALUES.get(attacker.piece_type, 0) if attacker else 0
+        # Undefended piece or favorable trade (capturing higher value with lower)
+        if captured_value > attacker_value:
+            return True
+        if captured_value > 0 and not board_after.is_attacked_by(side, opp_move.to_square):
+            return True
+
+    # Gate 4: very large EP loss almost always involves concrete material loss
+    # through a multi-move tactical sequence our shallow checks can't see
+    if ep_loss is not None and ep_loss >= 0.35:
+        return True
+
+    return False
+
+
 def detect_brilliant(
     board_before: chess.Board,
     board_after: chess.Board,
@@ -259,6 +324,10 @@ def detect_great(
          rate and huge candidate gaps.
       B. Capitalization: opponent's previous move was a non-trivial mistake
          and the player found the best response with a significant gap.
+      C. Defensive equalizer: only saving move from a losing position that
+         restores equality. Relaxed candidate gap requirement.
+      D. Seizing move: breakthrough from a balanced position into clearly
+         winning territory. Relaxed candidate gap requirement.
     """
     c = config or ClassificationConfig()
 
@@ -271,14 +340,13 @@ def detect_great(
     if board is not None and move is not None and _is_recapture(board, move):
         return False
 
-    # Filter: in already heavily-won positions, finding the "best" move is
-    # less impressive — chess.com rarely awards "great" when WP > 0.90.
-    if win_pct_before > c.great_max_win_pct_before or win_pct_before < c.great_min_win_pct_before:
-        return False
-
     # A. Candidate gap: the played move is uniquely strong — all alternatives
     #    are significantly worse. This is the primary "great" signal.
-    if candidate_gap_cp is not None and candidate_gap_cp >= c.great_min_candidate_gap_cp:
+    #    Only fires in non-decisive positions (chess.com rarely awards "great"
+    #    when WP > 0.90 or WP < 0.10).
+    if (candidate_gap_cp is not None
+            and candidate_gap_cp >= c.great_min_candidate_gap_cp
+            and c.great_min_win_pct_before <= win_pct_before <= c.great_max_win_pct_before):
         return True
 
     capitalization_gap_cp = max(
@@ -289,7 +357,9 @@ def detect_great(
     # B. Capitalization with gap: opponent made a moderate mistake and the
     #    player found the best response, but only if there's a meaningful gap
     #    to alternatives (otherwise it's just a routine best move).
-    if prev_context is not None and candidate_gap_cp is not None:
+    if (prev_context is not None
+            and candidate_gap_cp is not None
+            and c.great_min_win_pct_before <= win_pct_before <= c.great_max_win_pct_before):
         prev_ep_loss = prev_context.ep_loss
         if (prev_ep_loss is not None
                 and prev_ep_loss >= c.great_capitalization_min_ep_loss
@@ -297,6 +367,46 @@ def detect_great(
                 and candidate_gap_cp >= capitalization_gap_cp):
             return True
 
+    # C. Defensive equalizer: position was losing, this move restores equality.
+    #    The "greatness" comes from the position swing, not candidate gap alone.
+    if (candidate_gap_cp is not None
+            and candidate_gap_cp >= c.great_transition_min_gap_cp
+            and win_pct_before < c.great_defensive_losing_threshold
+            and win_pct_after >= c.great_defensive_equal_threshold):
+        return True
+
+    # D. Seizing move: position was balanced, this move creates a clearly
+    #    winning advantage. Breakthrough moves that change the game result.
+    if (candidate_gap_cp is not None
+            and candidate_gap_cp >= c.great_transition_min_gap_cp
+            and c.great_seizing_balanced_lower <= win_pct_before <= c.great_seizing_balanced_upper
+            and win_pct_after >= c.great_seizing_winning_threshold):
+        return True
+
+    return False
+
+
+def _best_move_wins_material(
+    board: chess.Board,
+    pv: list[chess.Move],
+    side: chess.Color,
+    depth: int = 4,
+) -> bool:
+    """
+    Check if following the best PV results in material gain within `depth` half-moves.
+    Uses relative material balance (our material minus opponent material) so that
+    exchanges don't count — only net gains.
+    """
+    initial = _material_balance(board, side) - _material_balance(board, not side)
+    temp = board.copy()
+    for move in pv[:depth]:
+        try:
+            temp.push(move)
+        except Exception:
+            break
+        current = _material_balance(temp, side) - _material_balance(temp, not side)
+        if current > initial:
+            return True
     return False
 
 
@@ -305,6 +415,8 @@ def detect_miss(
     best_win_pct: float,
     played_win_pct: float,
     ep_loss: float,
+    best_candidate: Optional[CandidateMove] = None,
+    board_before: Optional[chess.Board] = None,
     side: Optional[chess.Color] = None,
     elo: Optional[int] = None,
     config: Optional[ClassificationConfig] = None,
@@ -312,25 +424,54 @@ def detect_miss(
     """
     Returns True if the player missed capitalizing on opponent's mistake.
 
-    Miss = opponent's previous move was a mistake/blunder (EP loss >= threshold),
-    and the player's move loses significant expected points (ep_loss >= threshold).
-    The key idea: the opponent gave away advantage, and the player failed to
-    take it — like a "great" move that wasn't chosen.
+    Chess.com's miss requires a concrete missed opportunity:
+      1. Opponent created an opportunity (their previous move had significant EP loss)
+      2. Best reply achieves a concrete gain (wins material, finds mate, or reaches
+         clearly winning territory)
+      3. Player failed to capitalize (their move lost meaningful EP)
 
     Unlike inaccuracy/mistake/blunder, miss is contextual: the same EP loss
     that would be an inaccuracy in a normal position becomes a miss when the
-    opponent just blundered.
+    opponent just blundered and there was a concrete punishment available.
     """
     c = config or ClassificationConfig()
 
-    # Condition 1: opponent's previous move was a mistake or blunder
+    # Condition 1: opponent's previous move created an opportunity
     prev_ep_loss = prev_context.ep_loss
     if prev_ep_loss is None or prev_ep_loss < c.miss_opponent_ep_loss_threshold:
         return False
 
     # Condition 2: player's move loses meaningful expected points
-    # (the ep_loss is already side-corrected, so this works for both colors)
     if ep_loss < c.miss_min_ep_loss:
         return False
 
-    return True
+    # Condition 3: best reply achieves a concrete gain
+    # At least one of: wins material, finds mate, or reaches clearly winning
+    has_concrete_opportunity = False
+
+    if best_candidate is not None:
+        # 3a: best move finds forced mate
+        if best_candidate.mate_in is not None and best_candidate.mate_in > 0:
+            has_concrete_opportunity = True
+
+        # 3b: best PV wins material within N half-moves
+        if (not has_concrete_opportunity
+                and board_before is not None
+                and best_candidate.pv):
+            # Push best move first, then check PV for material gain
+            temp = board_before.copy()
+            try:
+                temp.push(best_candidate.move)
+                if _best_move_wins_material(
+                    temp, best_candidate.pv[1:], side or chess.WHITE,
+                    depth=c.miss_best_wins_material_depth,
+                ):
+                    has_concrete_opportunity = True
+            except Exception:
+                pass
+
+    # 3c: best reply crosses into clearly winning territory
+    if not has_concrete_opportunity and best_win_pct >= c.miss_best_win_pct_threshold:
+        has_concrete_opportunity = True
+
+    return has_concrete_opportunity

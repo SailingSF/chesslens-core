@@ -14,25 +14,31 @@ from dataclasses import dataclass
 class ClassificationConfig:
     """Tunable parameters for the EP classification system."""
 
-    # --- Sigmoid WDL provider (fallback) ---
-    # Base steepness constant (Lichess default, calibrated on 2300+ games)
-    k_base: float = 0.00368208
+    # --- Sigmoid WDL provider ---
+    # Base steepness constant for cp → win probability sigmoid.
+    # Calibrated against chess.com Classification V2 using SF16.1 1M-node
+    # analysis across 8 games (352 base-severity moves): k=0.0026 gives
+    # 73.9% base-label accuracy vs 71.6% at the old Lichess default (0.00368).
+    k_base: float = 0.00368
 
     # Elo scaling curve: scaling_factor = floor + range * sigmoid(steepness * (elo - midpoint))
     # Optimized via 4-phase grid search (43849 runs) against chess.com Classification V2
-    # using per-side Elos (365–1616) and SF16.1 depth-20 multipv-3 caches. 66.5% accuracy.
+    # using per-side Elos (365–1616) and SF16.1 depth-20 multipv-3 caches.
     elo_scale_floor: float = 0.80
     elo_scale_range: float = 0.20
     elo_scale_steepness: float = 0.005
     elo_scale_midpoint: float = 1700.0
 
-    # --- EP thresholds — calibrated against chess.com Classification V2 ---
+    # --- EP thresholds — pinned to chess.com's published table ---
+    # https://support.chess.com/en/articles/8572705-how-are-moves-classified
+    # These should NOT be optimizer-tuned; use the optimizer to validate
+    # contextual rules, not to drift thresholds away from published values.
     ep_best: float = 0.00
     ep_excellent: float = 0.02
-    ep_good: float = 0.04
-    ep_inaccuracy: float = 0.097
-    ep_mistake: float = 0.26
-    # anything above ep_mistake = blunder
+    ep_good: float = 0.05
+    ep_inaccuracy: float = 0.10
+    ep_mistake: float = 0.20
+    # anything above ep_mistake = blunder (but see blunder gate below)
 
     # --- Elo-dependent excellent threshold ---
     # At low Elo (below threshold), use a tighter excellent threshold.
@@ -77,9 +83,24 @@ class ClassificationConfig:
     # "only move" gap.
     great_capitalization_gap_scale: float = 0.5
     # "Great" should not fire in already decisive positions for either side.
+    # (applies to Trigger A candidate-gap only; transition triggers have own bounds)
     great_min_win_pct_before: float = 0.10
     great_max_win_pct_before: float = 0.90
+    # Trigger C — Defensive equalizer: only saving move from a losing position.
+    great_defensive_losing_threshold: float = 0.35   # win_pct_before must be below this
+    great_defensive_equal_threshold: float = 0.40     # win_pct_after must reach this
+    # Trigger D — Seizing move: breakthrough from balanced to clearly winning.
+    great_seizing_balanced_lower: float = 0.35
+    great_seizing_balanced_upper: float = 0.65
+    great_seizing_winning_threshold: float = 0.70     # win_pct_after must reach this
+    # Minimum candidate gap for transition triggers (relaxed vs Trigger A's 200cp).
+    great_transition_min_gap_cp: int = 50
 
     # --- Miss detection ---
-    miss_opponent_ep_loss_threshold: float = 0.04  # opponent's prev move EP loss
-    miss_min_ep_loss: float = 0.20                 # player's own EP loss to qualify
+    # Chess.com's miss requires a concrete missed opportunity, not just EP loss.
+    # Opponent must have created a real chance (tactical/material), best reply must
+    # achieve a concrete gain, and the player must have failed to capitalize.
+    miss_opponent_ep_loss_threshold: float = 0.11  # opponent's prev EP loss (optimizer-tuned: reduces false miss on mistakes)
+    miss_min_ep_loss: float = 0.08                 # player's own EP loss (lowered: catch moderate misses)
+    miss_best_wins_material_depth: int = 4         # half-moves to check material gain in best PV
+    miss_best_win_pct_threshold: float = 0.70      # best reply must reach this for "clearly winning" gate
