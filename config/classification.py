@@ -93,6 +93,9 @@ class ClassificationConfig:
     great_seizing_balanced_lower: float = 0.35
     great_seizing_balanced_upper: float = 0.65
     great_seizing_winning_threshold: float = 0.70     # win_pct_after must reach this
+    # When in check with this many or fewer legal moves, the response is
+    # forced and should not qualify as "great" regardless of candidate gap.
+    great_max_forced_check_moves: int = 3
     # Minimum candidate gap for transition triggers (relaxed vs Trigger A's 200cp).
     great_transition_min_gap_cp: int = 50
 
@@ -100,7 +103,8 @@ class ClassificationConfig:
     # Chess.com's miss requires a concrete missed opportunity, not just EP loss.
     # Opponent must have created a real chance (tactical/material), best reply must
     # achieve a concrete gain, and the player must have failed to capitalize.
-    miss_opponent_ep_loss_threshold: float = 0.11  # opponent's prev EP loss (optimizer-tuned: reduces false miss on mistakes)
-    miss_min_ep_loss: float = 0.08                 # player's own EP loss (lowered: catch moderate misses)
+    miss_opponent_ep_loss_threshold: float = 0.10  # opponent's prev EP loss
+    miss_min_ep_loss: float = 0.07                 # player's own EP loss
+    miss_blunder_override_min_prev_ep: float = 0.30  # opponent's prev EP loss required for miss to override blunder
     miss_best_wins_material_depth: int = 4         # half-moves to check material gain in best PV
     miss_best_win_pct_threshold: float = 0.70      # best reply must reach this for "clearly winning" gate

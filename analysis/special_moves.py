@@ -292,7 +292,13 @@ def _is_recapture(board: chess.Board, move: chess.Move) -> bool:
     if len(board.move_stack) == 0:
         return False
     prev_move = board.move_stack[-1]
-    return prev_move.to_square == move.to_square
+    if prev_move.to_square != move.to_square:
+        return False
+    # The previous move must also have been a capture (not just a move to that square).
+    # We need the board state before the previous move to check this.
+    temp = board.copy()
+    temp.pop()  # undo opponent's last move
+    return temp.is_capture(prev_move)
 
 
 def detect_great(
@@ -340,6 +346,27 @@ def detect_great(
     if board is not None and move is not None and _is_recapture(board, move):
         return False
 
+    # Filter: moves played while in check with very few legal options are
+    # forced, not great — the gap comes from having no real choice.
+    # When more options exist, the move can still be great (finding the
+    # one good response among several check-escaping moves).
+    if board is not None and board.is_check():
+        legal_count = board.legal_moves.count()
+        if legal_count <= c.great_max_forced_check_moves:
+            return False
+
+    # E. Mate-finding move: the best move leads to forced mate with a
+    #    significant gap to alternatives. These are great regardless of
+    #    the current win probability (even in winning positions).
+    if (candidate_gap_cp is not None
+            and candidate_gap_cp >= c.great_min_candidate_gap_cp
+            and len(candidates) >= 1
+            and candidates[0].mate_in is not None
+            and candidates[0].mate_in > 0):
+        # Best move leads to mate — check that alternatives don't also mate
+        if len(candidates) < 2 or candidates[1].mate_in is None:
+            return True
+
     # A. Candidate gap: the played move is uniquely strong — all alternatives
     #    are significantly worse. This is the primary "great" signal.
     #    Only fires in non-decisive positions (chess.com rarely awards "great"
@@ -357,14 +384,27 @@ def detect_great(
     # B. Capitalization with gap: opponent made a moderate mistake and the
     #    player found the best response, but only if there's a meaningful gap
     #    to alternatives (otherwise it's just a routine best move).
+    #    Response captures (capturing a piece that just moved to that square)
+    #    need a higher gap since they are more obvious.
     if (prev_context is not None
             and candidate_gap_cp is not None
             and c.great_min_win_pct_before <= win_pct_before <= c.great_max_win_pct_before):
         prev_ep_loss = prev_context.ep_loss
+        effective_cap_gap = capitalization_gap_cp
+        if (board is not None and move is not None
+                and board.is_capture(move)
+                and len(board.move_stack) > 0
+                and board.move_stack[-1].to_square == move.to_square):
+            # Capture responds to opponent's last move on the same square —
+            # more obvious, require 1.5x the normal capitalization gap.
+            effective_cap_gap = max(
+                effective_cap_gap,
+                int(round(capitalization_gap_cp * 1.5)),
+            )
         if (prev_ep_loss is not None
                 and prev_ep_loss >= c.great_capitalization_min_ep_loss
                 and prev_ep_loss < c.great_capitalization_max_ep_loss
-                and candidate_gap_cp >= capitalization_gap_cp):
+                and candidate_gap_cp >= effective_cap_gap):
             return True
 
     # C. Defensive equalizer: position was losing, this move restores equality.
