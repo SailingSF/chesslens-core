@@ -30,6 +30,9 @@ Usage:
     # Generate caches with specific engine params
     python tests/optimize_classification.py --generate-cache --depth 22 --multipv 4
 
+    # Fill in missing caches using settings already present on other games
+    python tests/optimize_classification.py --generate-cache --fill-missing
+
     # Optimize using real Stockfish caches
     python tests/optimize_classification.py --stockfish
 
@@ -80,6 +83,27 @@ ENGINE_PATHS = {
 }
 
 
+@dataclass(frozen=True)
+class CacheSpec:
+    """One cache configuration discovered from existing JSON cache filenames."""
+    engine_tag: str
+    multipv: int
+    depth: int | None = None
+    nodes: int | None = None
+
+    def __post_init__(self):
+        if (self.depth is None) == (self.nodes is None):
+            raise ValueError("CacheSpec must set exactly one of depth or nodes")
+
+    @property
+    def search_tag(self) -> str:
+        return f"n{self.nodes}" if self.nodes is not None else f"d{self.depth}"
+
+    @property
+    def summary(self) -> str:
+        return f"{self.engine_tag} {self.search_tag} pv{self.multipv}"
+
+
 def _resolve_engine(engine_arg: str | None) -> tuple[str, str]:
     """
     Resolve --engine argument to (binary_path, version_tag).
@@ -126,6 +150,89 @@ def _detect_engine_version(binary_path: str) -> str:
 def _find_game_csvs() -> list[Path]:
     """Find all game CSV files in the test_games directory."""
     return sorted(GAMES_DIR.glob("game_*.csv"))
+
+
+def _parse_cache_spec(cache_path: Path) -> CacheSpec | None:
+    """
+    Parse a cache filename into a CacheSpec.
+
+    Supports both versioned caches like:
+      game_01_sf16.1_d20_pv3.json
+      game_01_sf16.1_n2000000_pv3.json
+
+    And legacy depth-based caches like:
+      game_01_stockfish_d20_pv3.json
+    """
+    parts = cache_path.stem.split("_")
+    if len(parts) < 4:
+        return None
+
+    engine_tag = parts[-3]
+    search_tag = parts[-2]
+    pv_tag = parts[-1]
+
+    if not pv_tag.startswith("pv") or not pv_tag[2:].isdigit():
+        return None
+    multipv = int(pv_tag[2:])
+
+    if search_tag.startswith("d") and search_tag[1:].isdigit():
+        if engine_tag.startswith("sf") or engine_tag == "stockfish":
+            return CacheSpec(engine_tag=engine_tag, depth=int(search_tag[1:]), multipv=multipv)
+        return None
+
+    if search_tag.startswith("n") and search_tag[1:].isdigit():
+        if engine_tag.startswith("sf") or engine_tag == "stockfish":
+            return CacheSpec(engine_tag=engine_tag, nodes=int(search_tag[1:]), multipv=multipv)
+        return None
+
+    return None
+
+
+def _discover_cache_specs(cache_files: list[Path]) -> list[CacheSpec]:
+    """Discover unique cache configs from a collection of cache filenames."""
+    specs = {_parse_cache_spec(cache) for cache in cache_files}
+    return sorted(
+        (spec for spec in specs if spec is not None),
+        key=lambda spec: (
+            spec.engine_tag,
+            spec.nodes is None,
+            spec.depth if spec.depth is not None else -1,
+            spec.nodes if spec.nodes is not None else -1,
+            spec.multipv,
+        ),
+    )
+
+
+def _collect_existing_cache_specs(game_files: list[Path]) -> list[CacheSpec]:
+    """Collect all unique cache configs already present for any game."""
+    cache_files = []
+    for csv_path in game_files:
+        cache_files.extend(csv_path.parent.glob(f"{csv_path.stem}_*.json"))
+    return _discover_cache_specs(cache_files)
+
+
+def _missing_games_for_cache_spec(
+    game_files: list[Path],
+    spec: CacheSpec,
+    force: bool = False,
+) -> list[Path]:
+    """Return the games that still need a cache for the given spec."""
+    if force:
+        return list(game_files)
+
+    missing = []
+    depth = spec.depth if spec.depth is not None else 0
+    for csv_path in game_files:
+        cache = _cache_path(
+            csv_path,
+            depth=depth,
+            multipv=spec.multipv,
+            engine_tag=spec.engine_tag,
+            nodes=spec.nodes,
+        )
+        if not cache.exists():
+            missing.append(csv_path)
+    return missing
 
 
 @lru_cache(maxsize=1)
@@ -177,6 +284,9 @@ def _cache_path(
         search_tag = f"n{nodes}"
     else:
         search_tag = f"d{depth}"
+
+    if engine_tag == "stockfish":
+        return csv_path.parent / f"{csv_path.stem}_stockfish_{search_tag}_pv{multipv}.json"
 
     versioned = csv_path.parent / f"{csv_path.stem}_{engine_tag}_{search_tag}_pv{multipv}.json"
     if versioned.exists():
@@ -355,6 +465,83 @@ async def generate_all_caches(
             engine_path=engine_path, engine_tag=engine_tag,
         )
         generated.append(cache)
+
+    return generated
+
+
+def _resolve_engine_for_cache_spec(
+    spec: CacheSpec,
+    engine_override: str | None = None,
+) -> tuple[str, str] | None:
+    """
+    Resolve a discovered cache spec to a local Stockfish binary.
+
+    Returns (engine_path, engine_tag_to_use_for_filenames), or None if the
+    engine version cannot be resolved on this machine.
+    """
+    if spec.engine_tag == "stockfish":
+        engine_path, _ = _resolve_engine(engine_override)
+        return engine_path, "stockfish"
+
+    if spec.engine_tag in ENGINE_PATHS:
+        engine_path, resolved_tag = _resolve_engine(spec.engine_tag)
+        if resolved_tag not in {spec.engine_tag, "unknown"}:
+            print(
+                f"  WARNING: alias {spec.engine_tag} resolved to {resolved_tag} "
+                f"but caches are tagged {spec.engine_tag}; keeping filename tag."
+            )
+        return engine_path, spec.engine_tag
+
+    if engine_override:
+        engine_path, resolved_tag = _resolve_engine(engine_override)
+        if resolved_tag == spec.engine_tag:
+            return engine_path, spec.engine_tag
+
+    return None
+
+
+async def generate_missing_caches_for_discovered_settings(
+    game_files: list[Path],
+    specs: list[CacheSpec],
+    hash_mb: int = 128,
+    threads: int = 2,
+    force: bool = False,
+    engine_override: str | None = None,
+) -> list[Path]:
+    """Generate missing caches for every already-discovered cache setting."""
+    generated = []
+
+    for spec in specs:
+        resolved = _resolve_engine_for_cache_spec(spec, engine_override)
+        if resolved is None:
+            print(f"\nSkipping {spec.summary}: no local engine binary could be resolved")
+            print("  Use --engine with a matching binary path if needed.")
+            continue
+
+        engine_path, engine_tag = resolved
+        if not Path(engine_path).exists() and not shutil.which(engine_path):
+            print(f"\nSkipping {spec.summary}: engine binary not found at {engine_path}")
+            continue
+
+        target_games = _missing_games_for_cache_spec(game_files, spec, force=force)
+        if not target_games:
+            print(f"\n{spec.summary}: all games already have caches")
+            continue
+
+        print(f"\nGenerating missing caches for {spec.summary}:")
+        print(f"  Engine binary: {engine_path}")
+        print(f"  Games: {[f.name for f in target_games]}")
+        generated.extend(await generate_all_caches(
+            target_games,
+            depth=spec.depth if spec.depth is not None else 0,
+            nodes=spec.nodes,
+            multipv=spec.multipv,
+            hash_mb=hash_mb,
+            threads=threads,
+            force=force,
+            engine_path=engine_path,
+            engine_tag=engine_tag,
+        ))
 
     return generated
 
@@ -1411,8 +1598,37 @@ def cmd_compare(args):
 
 def cmd_generate_cache(args):
     """Generate Stockfish caches for all game files."""
-    engine_path, engine_tag = _resolve_engine(args.engine)
     nodes = args.nodes
+    game_files = _find_game_csvs()
+
+    if args.fill_missing:
+        specs = _collect_existing_cache_specs(game_files)
+        if not specs:
+            print("\nNo existing caches found to infer settings from.")
+            print("Run --generate-cache with an explicit engine/search setting first.")
+            return
+
+        print(f"\nGenerating missing caches from discovered settings:")
+        print(f"  Settings: {[spec.summary for spec in specs]}")
+        print(f"  Games: {[f.name for f in game_files]}")
+        if args.engine:
+            print(f"  Engine override: {args.engine}")
+        print(f"  Hash: {args.hash_mb}MB, threads={args.threads}")
+
+        start = time.time()
+        generated = asyncio.run(generate_missing_caches_for_discovered_settings(
+            game_files,
+            specs,
+            hash_mb=args.hash_mb,
+            threads=args.threads,
+            force=args.force,
+            engine_override=args.engine,
+        ))
+        elapsed = time.time() - start
+        print(f"\n  Generated {len(generated)} cache files in {elapsed:.1f}s")
+        return
+
+    engine_path, engine_tag = _resolve_engine(args.engine)
 
     if not Path(engine_path).exists() and not shutil.which(engine_path):
         print(f"ERROR: Engine binary not found: {engine_path}")
@@ -1420,7 +1636,6 @@ def cmd_generate_cache(args):
         print(f"  Available aliases: {', '.join(ENGINE_PATHS.keys())}")
         sys.exit(1)
 
-    game_files = _find_game_csvs()
     print(f"\nGenerating Stockfish caches:")
     print(f"  Engine: {engine_tag} ({engine_path})")
     if nodes:
@@ -1677,6 +1892,9 @@ Examples:
   %(prog)s --generate-cache --engine sf16.1 --nodes 2000000
   %(prog)s --generate-cache --engine sf16.1 --nodes 4000000
 
+  # Fill in missing caches for settings already present on other games
+  %(prog)s --generate-cache --fill-missing
+
   # Sweep engine versions + depth/nodes to find best match to chess.com
   %(prog)s --sweep-engine
 
@@ -1742,6 +1960,10 @@ multi-PV 2-3, Expected Points classification with Elo-adjusted sigmoid.
     parser.add_argument(
         "--force", action="store_true",
         help="Force regeneration of existing caches",
+    )
+    parser.add_argument(
+        "--fill-missing", action="store_true",
+        help="Infer existing cache settings from other games and generate only missing game/setting caches",
     )
 
     # Classification parameters
