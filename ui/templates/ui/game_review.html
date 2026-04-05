@@ -92,6 +92,8 @@ document.addEventListener('DOMContentLoaded', () => {
         board = Chessboard('board', {
             position: fen || 'start',
             pieceTheme: PIECE_THEME,
+            moveSpeed: 200,
+            snapbackSpeed: 150,
         });
     }
 
@@ -174,7 +176,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (points.length < 2) {
             ctx.fillStyle = '#9a8d7e';
-            ctx.font = '12px sans-serif';
+            ctx.font = '12px DM Sans, sans-serif';
             ctx.textAlign = 'center';
             ctx.fillText('Eval graph updates as analysis progresses...', W / 2, H / 2 + 4);
             return;
@@ -233,7 +235,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Labels
         ctx.fillStyle = '#9a8d7e';
-        ctx.font = '10px sans-serif';
+        ctx.font = '500 10px DM Sans, sans-serif';
         ctx.textAlign = 'left';
         ctx.fillText('White', 4, 12);
         ctx.fillText('Black', 4, H - 4);
@@ -474,10 +476,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         match.explanation = data.explanation;
                         match.analyzed = true;
                         updateMoveCell(match.index);
-                        drawEvalGraph();
-                        if (currentIndex === match.index) {
-                            updateExplanation();
-                        }
+                        // Auto-step board to the move being analyzed
+                        selectMove(match.index);
                     }
                 }
             }
