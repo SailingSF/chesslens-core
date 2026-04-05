@@ -28,6 +28,10 @@ class CandidateMove:
     score_cp: Optional[int]        # centipawns (None if mate)
     mate_in: Optional[int]         # moves to mate (None if not mate)
     pv: list[chess.Move] = field(default_factory=list)
+    # Native WDL from Stockfish 16+ (optional, permille 0–1000)
+    wdl_win: Optional[int] = None
+    wdl_draw: Optional[int] = None
+    wdl_loss: Optional[int] = None
 
 
 @dataclass
@@ -54,9 +58,16 @@ class EngineService:
         fen: str,
         *,
         depth: int = 20,
+        nodes: Optional[int] = None,
         multipv: int = 3,
         uci_options: Optional[dict] = None,
     ) -> EngineResult:
+        """
+        Analyze a position.
+
+        If nodes is set, uses node-based search (chess.com style) instead of
+        depth-based search. When nodes is set, depth is ignored.
+        """
         raise NotImplementedError
 
     async def shutdown(self) -> None:
@@ -86,12 +97,19 @@ class PooledEngineService(EngineService):
         fen: str,
         *,
         depth: int = 20,
+        nodes: Optional[int] = None,
         multipv: int = 3,
         uci_options: Optional[dict] = None,
     ) -> EngineResult:
         await self._ensure_started()
 
         board = chess.Board(fen)
+
+        # Node-based search (chess.com style) takes priority over depth
+        if nodes is not None:
+            limit = chess.engine.Limit(nodes=nodes)
+        else:
+            limit = chess.engine.Limit(depth=depth)
 
         async with self._pool.acquire() as engine:
             # Apply per-request UCI options (e.g. UCI_LimitStrength, UCI_Elo)
@@ -100,7 +118,7 @@ class PooledEngineService(EngineService):
 
             info_list = await engine.analyse(
                 board,
-                chess.engine.Limit(depth=depth),
+                limit,
                 multipv=multipv,
             )
 
@@ -113,7 +131,11 @@ class PooledEngineService(EngineService):
             info_list = [info_list]
 
         candidates = _parse_candidates(info_list)
-        return EngineResult(fen=fen, depth=depth, candidates=candidates)
+        # Report the depth actually reached (from engine info if available)
+        reached_depth = depth
+        if info_list and "depth" in info_list[0]:
+            reached_depth = info_list[0]["depth"]
+        return EngineResult(fen=fen, depth=reached_depth, candidates=candidates)
 
     async def shutdown(self) -> None:
         if self._started:
@@ -137,6 +159,7 @@ class RemoteEngineService(EngineService):
         fen: str,
         *,
         depth: int = 20,
+        nodes: Optional[int] = None,
         multipv: int = 3,
         uci_options: Optional[dict] = None,
     ) -> EngineResult:
@@ -148,6 +171,8 @@ class RemoteEngineService(EngineService):
             "multipv": multipv,
             "uci_options": uci_options or {},
         }
+        if nodes is not None:
+            payload["nodes"] = nodes
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{self._engine_url}/analyze", json=payload)
@@ -164,6 +189,9 @@ class RemoteEngineService(EngineService):
                 score_cp=c.get("score_cp"),
                 mate_in=c.get("mate_in"),
                 pv=pv,
+                wdl_win=c.get("wdl_win"),
+                wdl_draw=c.get("wdl_draw"),
+                wdl_loss=c.get("wdl_loss"),
             ))
 
         return EngineResult(fen=fen, depth=depth, candidates=candidates)
@@ -186,8 +214,22 @@ def _parse_candidates(info_list: list) -> list[CandidateMove]:
                 mate_in = pov.mate()
             else:
                 score_cp = pov.score()
+
+        # Parse native WDL from Stockfish 16+ (UCI_ShowWDL)
+        # python-chess exposes this as a PovWdl in info["wdl"]
+        wdl_win = None
+        wdl_draw = None
+        wdl_loss = None
+        wdl = info.get("wdl")
+        if wdl is not None:
+            pov_wdl = wdl.white()
+            wdl_win = pov_wdl.wins
+            wdl_draw = pov_wdl.draws
+            wdl_loss = pov_wdl.losses
+
         candidates.append(CandidateMove(
-            move=move, score_cp=score_cp, mate_in=mate_in, pv=pv
+            move=move, score_cp=score_cp, mate_in=mate_in, pv=pv,
+            wdl_win=wdl_win, wdl_draw=wdl_draw, wdl_loss=wdl_loss,
         ))
     return candidates
 

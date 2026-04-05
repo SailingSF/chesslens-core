@@ -34,6 +34,17 @@ from explanation.templates.game_review import (
 )
 
 
+def _parse_elo(value: str | None) -> int | None:
+    """Parse an Elo string from PGN headers. Returns None if missing or invalid."""
+    if value is None:
+        return None
+    try:
+        elo = int(value)
+        return elo if elo > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
 @dataclass
 class MoveAnalysis:
     move_number: int
@@ -63,11 +74,26 @@ class GameAnalyzer:
         analysis_depth: int = 16,
         multipv: int = 3,
         api_key: str | None = None,
+        player_elo: int | None = None,
+        opponent_elo: int | None = None,
     ) -> AsyncIterator[MoveAnalysis]:
         """Async generator — yields MoveAnalysis for each analyzed position."""
         game = chess.pgn.read_game(io.StringIO(pgn_text))
         if game is None:
             return
+
+        # Extract Elo from PGN headers (fallback to explicit params)
+        headers = game.headers
+        white_elo = _parse_elo(headers.get("WhiteElo")) or player_elo
+        black_elo = _parse_elo(headers.get("BlackElo")) or opponent_elo
+
+        # Assign per-side Elo based on player_color
+        if player_color == "white":
+            p_elo = white_elo or player_elo
+            o_elo = black_elo or opponent_elo
+        else:
+            p_elo = black_elo or player_elo
+            o_elo = white_elo or opponent_elo
 
         board = game.board()
         followup_depth = max(analysis_depth - 4, 10)
@@ -78,6 +104,7 @@ class GameAnalyzer:
         self._conversation: list[dict] = []
         # Track how many consecutive player moves went without LLM analysis
         player_moves_without_analysis = 0
+        prev_context: AssembledContext | None = None
 
         for node in game.mainline():
             move = node.move
@@ -89,6 +116,10 @@ class GameAnalyzer:
             if self._should_skip(board, move):
                 board.push(move)
                 continue
+
+            # Use the correct Elo for the side to move
+            move_player_elo = white_elo if color == "white" else black_elo
+            move_opponent_elo = black_elo if color == "white" else white_elo
 
             # Engine analysis on the position BEFORE the move
             engine_result = await self._engine.analyze(
@@ -114,8 +145,14 @@ class GameAnalyzer:
                         pv=[move],
                     ))
 
-            context = self._assembler.assemble(played_on, engine_result, move)
+            context = self._assembler.assemble(
+                played_on, engine_result, move,
+                player_elo=move_player_elo,
+                opponent_elo=move_opponent_elo,
+                prev_context=prev_context,
+            )
             priority = classify(engine_result, board=played_on)
+            prev_context = context
 
             # Smart filtering: decide if this move gets LLM commentary
             is_player_move = (color == player_color)
@@ -169,6 +206,9 @@ class GameAnalyzer:
     ) -> bool:
         """Decide if a move warrants full LLM commentary."""
         label = context.cp_loss_label
+        # Always explain special classifications
+        if label in ("brilliant", "great", "miss"):
+            return True
         # Always explain inaccuracies, mistakes, and blunders
         if label in ("inaccuracy", "mistake", "blunder"):
             return True
@@ -180,7 +220,8 @@ class GameAnalyzer:
             return True
         return False
 
-    def _should_skip(self, board: chess.Board, move: chess.Move) -> bool:
+    @staticmethod
+    def _should_skip(board: chess.Board, move: chess.Move) -> bool:
         """
         Skip positions that don't need full engine analysis to save time.
 

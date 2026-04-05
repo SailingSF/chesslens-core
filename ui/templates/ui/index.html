@@ -2,10 +2,11 @@
 {% block title %}ChessLens — Local Analysis{% endblock %}
 
 {% block content %}
-<hgroup>
+<div class="hero">
+    <span class="chess-icon">&#9822;</span>
     <h1>ChessLens</h1>
-    <p>Open-source chess analysis powered by Stockfish + Claude AI</p>
-</hgroup>
+    <p>Open-source chess analysis powered by Stockfish&nbsp;+&nbsp;Claude&nbsp;AI</p>
+</div>
 
 <section id="api-key-section">
     <article>
@@ -24,7 +25,7 @@
     </article>
 </section>
 
-<div class="grid">
+<div class="feature-cards">
     <article>
         <h3>Game Review</h3>
         <p>Paste a PGN and get move-by-move analysis with plain-language explanations of mistakes and key moments.</p>
@@ -37,7 +38,7 @@
     </article>
 </div>
 
-<article>
+<article class="promo-card">
     <h3>Looking for the full experience?</h3>
     <p>
         <a href="https://chesslens.ai" target="_blank" rel="noopener">chesslens.ai</a>

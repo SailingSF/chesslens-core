@@ -1,9 +1,14 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}ChessLens{% endblock %}</title>
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
 
     <!-- Pico CSS — classless styling -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
@@ -13,7 +18,7 @@
           href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
 
     {% load static %}
-    <link rel="stylesheet" href="{% static 'ui/app.css' %}">
+    <link rel="stylesheet" href="{% static 'ui/app.css' %}?v=2">
 </head>
 <body>
     <header class="container">
@@ -50,7 +55,7 @@
     <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 
     {% load static %}
-    <script src="{% static 'ui/app.js' %}"></script>
+    <script src="{% static 'ui/app.js' %}?v=2"></script>
     {% block extra_js %}{% endblock %}
 </body>
 </html>

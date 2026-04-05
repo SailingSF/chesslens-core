@@ -1,14 +1,155 @@
-/* ChessLens UI — minimal overrides on top of Pico CSS */
+/* ChessLens UI — "The Warm Study" aesthetic
+   Warm parchment + walnut + gold. Playfair Display / DM Sans.
+   Fonts loaded via <link> in base.html. */
 
-/* Board wrapper — give chessboard.js a concrete width */
+/* =========================================================
+   1. FORCE the warm palette — direct element overrides
+      so Pico's :root white can never win the cascade.
+   ========================================================= */
+
+html[data-theme="light"],
+html:not([data-theme="dark"]) {
+    /* Tell Pico about our palette */
+    --pico-background-color: #efe7d8;
+    --pico-card-background-color: #f8f3ea;
+    --pico-card-sectioning-background-color: #ede5d5;
+    --pico-color: #33291c;
+    --pico-h1-color: #2a1f0e;
+    --pico-h2-color: #33291c;
+    --pico-h3-color: #3d3222;
+    --pico-muted-color: #8c7e6a;
+    --pico-muted-border-color: #d4c5aa;
+    --pico-primary: #9b7424;
+    --pico-primary-hover: #7d5d1c;
+    --pico-primary-focus: rgba(155, 116, 36, 0.22);
+    --pico-primary-background: #9b7424;
+    --pico-primary-hover-background: #7d5d1c;
+    --pico-primary-border: #9b7424;
+    --pico-primary-hover-border: #7d5d1c;
+    --pico-primary-inverse: #faf6ef;
+    --pico-secondary: #6b5e4f;
+    --pico-secondary-hover: #554a3d;
+    --pico-secondary-background: #6b5e4f;
+    --pico-secondary-hover-background: #554a3d;
+    --pico-form-element-background-color: #f8f3ea;
+    --pico-form-element-active-background-color: #fff8ec;
+    --pico-form-element-border-color: #d1c3ab;
+    --pico-form-element-focus-color: #9b7424;
+    --pico-code-background-color: #e8dece;
+    --pico-dropdown-background-color: #f8f3ea;
+    --pico-dropdown-hover-background-color: #ede5d5;
+    --pico-table-row-stripped-background-color: rgba(155, 116, 36, 0.04);
+    --pico-border-radius: 6px;
+    --pico-font-family: 'DM Sans', sans-serif;
+    --pico-font-size: 16px;
+    --pico-line-height: 1.6;
+
+    /* Our own tokens */
+    --cl-bg: #efe7d8;
+    --cl-surface: #f8f3ea;
+    --cl-surface-raised: #fdf9f2;
+    --cl-border: #d4c5aa;
+    --cl-border-strong: #c0ad8e;
+    --cl-gold: #c9a243;
+    --cl-gold-dim: rgba(201, 162, 67, 0.18);
+    --cl-text: #33291c;
+    --cl-text-soft: #6b5e4f;
+    --cl-text-muted: #8c7e6a;
+    --cl-cream: #fff8ec;
+    --cl-shadow: rgba(42, 31, 14, 0.1);
+    --cl-shadow-soft: rgba(42, 31, 14, 0.05);
+}
+
+/* Force background on html+body — override Pico's white */
+html, body {
+    background-color: #efe7d8 !important;
+    color: var(--cl-text);
+}
+
+/* Force card backgrounds */
+article {
+    background: var(--cl-surface) !important;
+    border-color: var(--cl-border) !important;
+}
+
+/* Force form element backgrounds */
+input, select, textarea {
+    background-color: var(--cl-surface) !important;
+    border-color: var(--cl-border) !important;
+}
+
+input:focus, select:focus, textarea:focus {
+    border-color: var(--cl-gold) !important;
+    box-shadow: 0 0 0 3px var(--cl-gold-dim) !important;
+}
+
+/* =========================================================
+   2. TYPOGRAPHY
+   ========================================================= */
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: 'Playfair Display', Georgia, serif;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--cl-text);
+}
+
+h1 { font-weight: 700; }
+
+/* =========================================================
+   3. NAVIGATION
+   ========================================================= */
+
+header.container nav {
+    border-bottom: 2px solid var(--cl-border-strong);
+    padding-bottom: 0.6rem;
+}
+
+header.container nav a {
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    color: var(--cl-text-soft);
+}
+
+header.container nav a:hover {
+    color: var(--cl-text);
+}
+
+header.container nav ul:first-child a {
+    font-family: 'Playfair Display', Georgia, serif;
+    font-size: 1.15em;
+    letter-spacing: 0.02em;
+    color: var(--cl-text);
+}
+
+/* =========================================================
+   4. FOOTER
+   ========================================================= */
+
+footer {
+    margin-top: 3rem;
+    text-align: center;
+    opacity: 0.55;
+    border-top: 1px solid var(--cl-border);
+    padding-top: 1.25rem;
+}
+
+/* =========================================================
+   5. CHESS BOARD
+   ========================================================= */
+
 #board-wrapper {
     width: 400px;
     max-width: 100%;
 }
 
 #board .board-b72b1 {
-    border: 2px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
+    border: 2px solid var(--cl-border-strong);
+    border-radius: 4px;
+    box-shadow:
+        0 4px 16px var(--cl-shadow),
+        0 1px 3px var(--cl-shadow-soft);
 }
 
 #result-card blockquote {
@@ -16,20 +157,17 @@
     font-style: italic;
 }
 
-footer {
-    margin-top: 3rem;
-    text-align: center;
-    opacity: 0.7;
-}
-
-/* --- Eval Graph --- */
+/* =========================================================
+   6. EVAL GRAPH
+   ========================================================= */
 
 #eval-graph-container {
     margin-bottom: 1rem;
-    border: 1px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
+    border: 1px solid var(--cl-border);
+    border-radius: 6px;
     overflow: hidden;
     cursor: pointer;
+    box-shadow: inset 0 1px 3px var(--cl-shadow-soft);
 }
 
 #eval-graph {
@@ -37,7 +175,9 @@ footer {
     width: 100%;
 }
 
-/* --- Game Review Layout --- */
+/* =========================================================
+   7. GAME REVIEW LAYOUT
+   ========================================================= */
 
 .analysis-layout {
     display: grid;
@@ -55,42 +195,119 @@ footer {
 /* Board controls */
 #board-controls {
     display: flex;
-    gap: 0.4rem;
+    gap: 0.35rem;
     justify-content: center;
-    margin: 0.5rem 0;
+    margin: 0.6rem 0;
 }
 
 #board-controls button {
     padding: 0.3rem 0.7rem;
     font-size: 1.1rem;
     min-width: 2.2rem;
+    border-radius: 5px;
+    font-family: 'DM Sans', sans-serif;
+    background: var(--cl-surface) !important;
+    border-color: var(--cl-border) !important;
+    color: var(--cl-text-soft);
 }
 
-/* Explanation panel */
+#board-controls button:hover {
+    background: var(--cl-surface-raised) !important;
+    color: var(--cl-text);
+}
+
+/* =========================================================
+   8. EXPLANATION PANEL — "Coach's Note"
+   ========================================================= */
+
 #explanation-panel {
     margin-top: 0.75rem;
-    padding: 0.75rem 1rem;
-    border: 1px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
-    min-height: 4rem;
-    background: var(--pico-card-background-color);
+    padding: 1rem 1.25rem;
+    border: 1px solid #ddd0b8;
+    border-left: 4px solid var(--cl-gold);
+    border-radius: 4px 6px 6px 4px;
+    min-height: 4.5rem;
+    background: linear-gradient(145deg, #fffbf0 0%, #fff3dd 100%) !important;
+    box-shadow:
+        0 2px 10px var(--cl-shadow),
+        0 0 0 1px rgba(201, 162, 67, 0.06);
+    position: relative;
+}
+
+/* Subtle paper-grain texture */
+#explanation-panel::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 4px 6px 6px 4px;
+    pointer-events: none;
+    opacity: 0.4;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    background-size: 150px;
 }
 
 .explanation-header {
-    margin-bottom: 0.4rem;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--cl-gold-dim);
+    font-family: 'DM Sans', sans-serif;
+}
+
+.explanation-header strong {
+    font-family: 'Playfair Display', Georgia, serif;
+    font-size: 1.05em;
+    font-weight: 600;
+    color: var(--cl-text);
 }
 
 .explanation-text {
     margin: 0;
-    line-height: 1.5;
+    line-height: 1.65;
+    color: #3d3222;
+    font-size: 0.95em;
+}
+
+.explanation-text p {
+    margin: 0 0 0.4rem 0;
+}
+
+.explanation-text p:last-child {
+    margin-bottom: 0;
+}
+
+.explanation-text ul,
+.explanation-text ol {
+    margin: 0.3rem 0;
+    padding-left: 1.5rem;
+}
+
+.explanation-text strong {
+    color: #2a1f0e;
+    font-weight: 600;
+}
+
+.explanation-text em {
+    color: var(--cl-text-soft);
+}
+
+.explanation-text code {
+    font-size: 0.88em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(155, 116, 36, 0.1);
+    color: #5a4a32;
 }
 
 .cp-value {
-    opacity: 0.6;
-    font-size: 0.85em;
+    opacity: 0.5;
+    font-size: 0.82em;
+    font-family: 'DM Sans', sans-serif;
 }
 
-/* Move list */
+/* =========================================================
+   9. MOVE LIST
+   ========================================================= */
+
 #moves-col {
     min-width: 0;
 }
@@ -98,10 +315,11 @@ footer {
 #move-list {
     max-height: 480px;
     overflow-y: auto;
-    border: 1px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
-    padding: 0.25rem;
-    background: var(--pico-card-background-color);
+    border: 1px solid var(--cl-border);
+    border-radius: 6px;
+    padding: 0.3rem;
+    background: var(--cl-surface) !important;
+    box-shadow: inset 0 1px 3px var(--cl-shadow-soft);
 }
 
 .move-row {
@@ -111,129 +329,238 @@ footer {
     align-items: center;
 }
 
+.move-row:nth-child(even) {
+    background: rgba(155, 116, 36, 0.035);
+    border-radius: 3px;
+}
+
 .move-num {
     width: 2.2rem;
     text-align: right;
-    opacity: 0.5;
-    font-size: 0.85em;
+    opacity: 0.45;
+    font-size: 0.82em;
     flex-shrink: 0;
-    padding-right: 0.25rem;
+    padding-right: 0.3rem;
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 500;
 }
 
 .move-cell {
     flex: 1;
-    padding: 3px 6px;
-    border-radius: 3px;
+    padding: 4px 7px;
+    border-radius: 4px;
     cursor: pointer;
     display: flex;
     align-items: center;
     gap: 0.3rem;
     min-width: 0;
+    transition: background-color 0.15s ease;
 }
 
 .move-cell:hover {
-    background: var(--pico-secondary-hover);
+    background: rgba(155, 116, 36, 0.1);
 }
 
 .move-cell.selected {
-    background: var(--pico-primary-focus);
+    background: rgba(155, 116, 36, 0.2);
+    box-shadow: inset 0 0 0 1px rgba(155, 116, 36, 0.18);
 }
 
 .move-san {
     font-weight: 600;
+    font-size: 0.95em;
 }
 
-/* Assessment badges */
+/* =========================================================
+   10. ASSESSMENT BADGES
+   ========================================================= */
+
 .badge {
-    font-size: 0.7em;
+    font-size: 0.65em;
     padding: 1px 5px;
     border-radius: 3px;
     white-space: nowrap;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.04em;
+    font-family: 'DM Sans', sans-serif;
 }
 
-.badge-best {
-    background: #27ae60;
-    color: #fff;
-}
-
-.badge-excellent {
-    background: #2ecc71;
-    color: #000;
-}
-
-.badge-good {
-    background: #82c91e;
-    color: #000;
-}
-
-.badge-inaccuracy {
-    background: #f1c40f;
-    color: #000;
-}
-
-.badge-mistake {
-    background: #e67e22;
-    color: #fff;
-}
-
-.badge-blunder {
-    background: #e74c3c;
-    color: #fff;
-}
-
-.badge-unknown {
-    background: #7f8c8d;
-    color: #fff;
-}
-
-.badge-book {
-    background: #5b6abf;
-    color: #fff;
-}
-
-.badge-forced {
-    background: #555;
-    color: #aaa;
-}
+.badge-best      { background: #1e8449; color: #fff; }
+.badge-excellent  { background: #27ae60; color: #fff; }
+.badge-good       { background: #6b9e1e; color: #fff; }
+.badge-inaccuracy { background: #d4a017; color: #fff; }
+.badge-mistake    { background: #d47a17; color: #fff; }
+.badge-blunder    { background: #c0392b; color: #fff; }
+.badge-unknown    { background: #7f8c8d; color: #fff; }
+.badge-book       { background: #5b6abf; color: #fff; }
+.badge-forced     { background: #c4b8a6; color: #5a4a32; }
+.badge-brilliant  { background: #1abc9c; color: #fff; }
+.badge-great      { background: #7b9bb2; color: #fff; }
+.badge-miss       { background: #e67e22; color: #fff; }
 
 #analysis-status {
     margin-top: 0.5rem;
     text-align: center;
+    font-size: 0.9em;
+    color: var(--cl-text-muted);
 }
 
-/* --- Game Summary --- */
+/* =========================================================
+   11. GAME SUMMARY
+   ========================================================= */
 
 #game-summary {
     margin-top: 1.5rem;
-    padding: 1rem 1.25rem;
-    border: 1px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
-    background: var(--pico-card-background-color);
+    padding: 1.25rem 1.5rem;
+    border: 1px solid #ddd0b8 !important;
+    border-left: 4px solid var(--cl-gold) !important;
+    border-radius: 4px 6px 6px 4px;
+    background: linear-gradient(145deg, #fffbf0 0%, #fff3dd 100%) !important;
+    box-shadow:
+        0 2px 10px var(--cl-shadow),
+        0 0 0 1px rgba(201, 162, 67, 0.06);
 }
 
 #game-summary h3 {
     margin-top: 0;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.6rem;
+    font-family: 'Playfair Display', Georgia, serif;
+    color: #2a1f0e;
+    font-size: 1.2em;
+}
+
+#summary-text {
+    line-height: 1.65;
+    font-size: 0.95em;
+    color: #3d3222;
 }
 
 #summary-text p {
-    line-height: 1.6;
+    margin-bottom: 0.5rem;
 }
 
-/* --- Markdown in explanations --- */
-
-.explanation-text p {
-    margin: 0 0 0.3rem 0;
-}
-
-.explanation-text p:last-child {
+#summary-text p:last-child {
     margin-bottom: 0;
 }
 
-/* --- Position Explorer Layout --- */
+/* Hide duplicate "Game Summary" heading from LLM output */
+#summary-text > h1:first-child,
+#summary-text > h2:first-child,
+#summary-text > h3:first-child {
+    display: none;
+}
+
+/* =========================================================
+   12. HOMEPAGE
+   ========================================================= */
+
+.hero {
+    text-align: center;
+    padding: 2.5rem 1rem 2rem;
+    margin-bottom: 1.5rem;
+    position: relative;
+}
+
+.hero h1 {
+    font-family: 'Playfair Display', Georgia, serif;
+    font-size: 2.8rem;
+    font-weight: 700;
+    color: #2a1f0e;
+    margin-bottom: 0.3rem;
+    letter-spacing: -0.02em;
+}
+
+.hero .chess-icon {
+    display: block;
+    font-size: 2.4rem;
+    margin-bottom: 0.4rem;
+    opacity: 0.65;
+    line-height: 1;
+}
+
+.hero p {
+    font-size: 1.1rem;
+    color: var(--cl-text-soft);
+    max-width: 500px;
+    margin: 0 auto;
+    line-height: 1.5;
+}
+
+.feature-cards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+    margin-bottom: 1.5rem;
+}
+
+@media (max-width: 600px) {
+    .feature-cards {
+        grid-template-columns: 1fr;
+    }
+    .hero h1 {
+        font-size: 2.2rem;
+    }
+}
+
+.feature-cards article {
+    position: relative;
+    overflow: hidden;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.feature-cards article:hover {
+    box-shadow: 0 6px 24px var(--cl-shadow) !important;
+    transform: translateY(-2px);
+}
+
+.feature-cards article h3 {
+    font-family: 'Playfair Display', Georgia, serif;
+    font-size: 1.15em;
+}
+
+.feature-cards article p {
+    font-size: 0.92em;
+    color: #5a4a32;
+    line-height: 1.55;
+}
+
+/* API key section */
+#api-key-section article {
+    border: 1px solid var(--cl-border) !important;
+    background: var(--cl-surface) !important;
+}
+
+#api-key-section h3 {
+    font-size: 1em;
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 600;
+    color: var(--cl-text-soft);
+    margin-bottom: 0.4rem;
+}
+
+#key-status {
+    color: #9b7424;
+    font-weight: 500;
+}
+
+/* Promo card */
+.promo-card {
+    text-align: center;
+    border: 1px dashed var(--cl-border) !important;
+    background: transparent !important;
+}
+
+.promo-card h3 {
+    font-size: 1em;
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 600;
+    color: var(--cl-text-soft);
+}
+
+/* =========================================================
+   13. POSITION EXPLORER
+   ========================================================= */
 
 .explorer-layout {
     display: grid;
@@ -277,14 +604,13 @@ footer {
 }
 
 /* Candidate moves */
-
 .candidate-row {
     display: grid;
     grid-template-columns: 1.5rem 3.5rem 4rem 1fr;
     gap: 0.5rem;
     align-items: center;
     padding: 0.5rem 0.6rem;
-    border-bottom: 1px solid var(--pico-muted-border-color);
+    border-bottom: 1px solid var(--cl-border);
 }
 
 .candidate-row:last-child {
@@ -311,25 +637,29 @@ footer {
     text-align: center;
 }
 
-.eval-winning {
-    background: #27ae60;
-    color: #fff;
-}
-
-.eval-losing {
-    background: #e74c3c;
-    color: #fff;
-}
-
-.eval-equal {
-    background: #7f8c8d;
-    color: #fff;
-}
+.eval-winning { background: #1e8449; color: #fff; }
+.eval-losing  { background: #c0392b; color: #fff; }
+.eval-equal   { background: #7f8c8d; color: #fff; }
 
 .candidate-pv {
     font-size: 0.82em;
-    opacity: 0.65;
+    opacity: 0.6;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* =========================================================
+   14. PAGE-LEVEL BACKGROUND TEXTURE
+   ========================================================= */
+
+body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: -1;
+    opacity: 0.5;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+    background-size: 200px;
 }
