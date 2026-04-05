@@ -301,6 +301,16 @@ def _is_recapture(board: chess.Board, move: chess.Move) -> bool:
     return temp.is_capture(prev_move)
 
 
+def _white_pov_to_side_win_pct(
+    win_pct: float,
+    side: Optional[chess.Color],
+) -> float:
+    """Convert white-perspective win probability to the mover's perspective."""
+    if side == chess.BLACK:
+        return 1.0 - win_pct
+    return win_pct
+
+
 def detect_great(
     ep_loss: float,
     win_pct_before: float,
@@ -309,6 +319,7 @@ def detect_great(
     provider: WDLProvider,
     board: Optional[chess.Board] = None,
     move: Optional[chess.Move] = None,
+    side: Optional[chess.Color] = None,
     elo: Optional[int] = None,
     config: Optional[ClassificationConfig] = None,
     prev_context: Optional[AssembledContext] = None,
@@ -324,6 +335,10 @@ def detect_great(
       - The move is essentially the "only good move" in the position
       - The move is NOT a recapture or forced/obvious response
 
+    `win_pct_before` and `win_pct_after` are expected to be in white's
+    perspective, matching engine output. Threshold checks are applied from the
+    mover's perspective after normalization.
+
     Triggers (in priority order):
       A. Candidate gap: engine's top move with a large gap to alternatives.
          This is the primary trigger — chess.com great moves have 100% top-move
@@ -336,6 +351,9 @@ def detect_great(
          winning territory. Relaxed candidate gap requirement.
     """
     c = config or ClassificationConfig()
+    side_to_move = side if side is not None else (board.turn if board is not None else None)
+    mover_win_pct_before = _white_pov_to_side_win_pct(win_pct_before, side_to_move)
+    mover_win_pct_after = _white_pov_to_side_win_pct(win_pct_after, side_to_move)
 
     # Must be the engine's top choice (or very near-best) for any "great"
     if not is_engine_top or ep_loss > c.great_ep_tolerance:
@@ -373,7 +391,7 @@ def detect_great(
     #    when WP > 0.90 or WP < 0.10).
     if (candidate_gap_cp is not None
             and candidate_gap_cp >= c.great_min_candidate_gap_cp
-            and c.great_min_win_pct_before <= win_pct_before <= c.great_max_win_pct_before):
+            and c.great_min_win_pct_before <= mover_win_pct_before <= c.great_max_win_pct_before):
         return True
 
     capitalization_gap_cp = max(
@@ -388,7 +406,7 @@ def detect_great(
     #    need a higher gap since they are more obvious.
     if (prev_context is not None
             and candidate_gap_cp is not None
-            and c.great_min_win_pct_before <= win_pct_before <= c.great_max_win_pct_before):
+            and c.great_min_win_pct_before <= mover_win_pct_before <= c.great_max_win_pct_before):
         prev_ep_loss = prev_context.ep_loss
         effective_cap_gap = capitalization_gap_cp
         if (board is not None and move is not None
@@ -411,16 +429,16 @@ def detect_great(
     #    The "greatness" comes from the position swing, not candidate gap alone.
     if (candidate_gap_cp is not None
             and candidate_gap_cp >= c.great_transition_min_gap_cp
-            and win_pct_before < c.great_defensive_losing_threshold
-            and win_pct_after >= c.great_defensive_equal_threshold):
+            and mover_win_pct_before < c.great_defensive_losing_threshold
+            and mover_win_pct_after >= c.great_defensive_equal_threshold):
         return True
 
     # D. Seizing move: position was balanced, this move creates a clearly
     #    winning advantage. Breakthrough moves that change the game result.
     if (candidate_gap_cp is not None
             and candidate_gap_cp >= c.great_transition_min_gap_cp
-            and c.great_seizing_balanced_lower <= win_pct_before <= c.great_seizing_balanced_upper
-            and win_pct_after >= c.great_seizing_winning_threshold):
+            and c.great_seizing_balanced_lower <= mover_win_pct_before <= c.great_seizing_balanced_upper
+            and mover_win_pct_after >= c.great_seizing_winning_threshold):
         return True
 
     return False

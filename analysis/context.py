@@ -58,9 +58,9 @@ class AssembledContext:
     pv_san: list[str]                    # principal variation in SAN notation
 
     # Expected Points data
-    win_pct_before: Optional[float] = None   # win probability at best eval (0.0–1.0)
-    win_pct_after: Optional[float] = None    # win probability at played move eval (0.0–1.0)
-    ep_loss: Optional[float] = None          # win_pct_before - win_pct_after
+    win_pct_before: Optional[float] = None   # white-perspective win probability at best eval (0.0-1.0)
+    win_pct_after: Optional[float] = None    # white-perspective win probability at played eval (0.0-1.0)
+    ep_loss: Optional[float] = None          # expected points lost by side to move
     player_elo: Optional[int] = None         # Elo used for curve adjustment
     opponent_elo: Optional[int] = None       # stored for context
     wdl_source: str = "sigmoid"              # "sigmoid" or "native"
@@ -265,6 +265,7 @@ class ContextAssembler:
                 win_pct_after=played_win_pct,
                 candidates=engine_result.candidates,
                 provider=provider, board=board, move=played_move,
+                side=side,
                 elo=player_elo, config=self._config,
                 prev_context=prev_context,
                 is_engine_top=is_engine_top,

@@ -557,6 +557,30 @@ class TestGreatMoveDetection:
         )
         assert result is False
 
+    def test_great_normalizes_white_pov_for_black_moves(self):
+        """Black great-move thresholds should use black's perspective, not white's."""
+        provider = SigmoidWDLProvider()
+        board = chess.Board()
+        board.push(chess.Move.from_uci("e2e4"))
+        moves = list(board.legal_moves)
+
+        result = detect_great(
+            ep_loss=0.0,
+            win_pct_before=0.75,  # white POV: black is losing
+            win_pct_after=0.45,   # white POV: black has equalized
+            candidates=[
+                CandidateMove(move=moves[0], score_cp=-100, mate_in=None, pv=[moves[0]]),
+                CandidateMove(move=moves[1], score_cp=200, mate_in=None, pv=[moves[1]]),
+            ],
+            provider=provider,
+            board=board,
+            move=moves[0],
+            elo=2000,
+            is_engine_top=True,
+            candidate_gap_cp=100,
+        )
+        assert result is True
+
     def test_great_respects_configured_capitalization_gap_scale(self):
         """Capitalization gap threshold should come from config, not hard-coded half-gap."""
         provider = SigmoidWDLProvider()
