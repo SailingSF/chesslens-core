@@ -29,6 +29,7 @@ from analysis.special_moves import (
     detect_great,
     detect_miss,
 )
+from tests._engine_result_helpers import make_result, make_result_with_wdl
 from chess_engine.service import CandidateMove, EngineResult
 from config.classification import ClassificationConfig
 
@@ -36,32 +37,6 @@ from config.classification import ClassificationConfig
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _make_result(candidates: list[tuple], fen: str | None = None) -> EngineResult:
-    """Build EngineResult from (score_cp, mate_in) tuples."""
-    board = chess.Board(fen) if fen else chess.Board()
-    moves = list(board.legal_moves)
-    cs = []
-    for i, (cp, mate) in enumerate(candidates):
-        cs.append(CandidateMove(
-            move=moves[i], score_cp=cp, mate_in=mate, pv=[moves[i]],
-        ))
-    return EngineResult(fen=board.fen(), depth=20, candidates=cs)
-
-
-def _make_result_with_wdl(
-    candidates: list[tuple], fen: str | None = None,
-) -> EngineResult:
-    """Build EngineResult from (score_cp, mate_in, wdl_win, wdl_draw, wdl_loss) tuples."""
-    board = chess.Board(fen) if fen else chess.Board()
-    moves = list(board.legal_moves)
-    cs = []
-    for i, (cp, mate, ww, wd, wl) in enumerate(candidates):
-        cs.append(CandidateMove(
-            move=moves[i], score_cp=cp, mate_in=mate, pv=[moves[i]],
-            wdl_win=ww, wdl_draw=wd, wdl_loss=wl,
-        ))
-    return EngineResult(fen=board.fen(), depth=20, candidates=cs)
 
 
 # ===========================================================================
@@ -185,12 +160,12 @@ class TestNativeWDLProvider:
 
 class TestResolveProvider:
     def test_selects_native_when_wdl_present(self):
-        result = _make_result_with_wdl([(100, None, 600, 300, 100)])
+        result = make_result_with_wdl([(100, None, 600, 300, 100)])
         provider = resolve_provider(result)
         assert isinstance(provider, StockfishNativeWDLProvider)
 
     def test_selects_sigmoid_when_no_wdl(self):
-        result = _make_result([(100, None)])
+        result = make_result([(100, None)])
         provider = resolve_provider(result)
         assert isinstance(provider, SigmoidWDLProvider)
 

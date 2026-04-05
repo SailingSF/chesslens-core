@@ -12,49 +12,36 @@ from analysis.context import ContextAssembler, _classify_cp_loss, _mate_to_cp
 from analysis.pawns import analyze_pawns
 from analysis.patterns import detect_tactics
 from analysis.priority import PriorityTier, classify
+from tests._engine_result_helpers import make_result
 from chess_engine.service import CandidateMove, EngineResult
 
 
 # --- Helpers ---
 
-def _make_result(candidates: list[tuple], fen: str | None = None) -> EngineResult:
-    """Helper: build EngineResult from (score_cp, mate_in) tuples."""
-    board = chess.Board(fen) if fen else chess.Board()
-    moves = list(board.legal_moves)
-    cs = []
-    for i, (cp, mate) in enumerate(candidates):
-        cs.append(CandidateMove(
-            move=moves[i],
-            score_cp=cp,
-            mate_in=mate,
-            pv=[moves[i]],
-        ))
-    return EngineResult(fen=board.fen(), depth=20, candidates=cs)
-
 
 # --- Priority classifier ---
 
 def test_priority_critical_mate():
-    result = _make_result([(None, 2), (50, None)])
+    result = make_result([(None, 2), (50, None)])
     pr = classify(result)
     assert pr.tier == PriorityTier.CRITICAL
     assert "mate" in pr.trigger
 
 
 def test_priority_critical_gap():
-    result = _make_result([(300, None), (50, None)])
+    result = make_result([(300, None), (50, None)])
     pr = classify(result)
     assert pr.tier == PriorityTier.CRITICAL
 
 
 def test_priority_tactical():
-    result = _make_result([(100, None), (40, None), (30, None)])
+    result = make_result([(100, None), (40, None), (30, None)])
     pr = classify(result)
     assert pr.tier == PriorityTier.TACTICAL
 
 
 def test_priority_strategic():
-    result = _make_result([(20, None), (10, None), (5, None)])
+    result = make_result([(20, None), (10, None), (5, None)])
     pr = classify(result)
     assert pr.tier == PriorityTier.STRATEGIC
 
@@ -62,7 +49,7 @@ def test_priority_strategic():
 def test_priority_with_board_passes_through():
     """classify() accepts an optional board argument for capture detection."""
     board = chess.Board()
-    result = _make_result([(100, None), (40, None)])
+    result = make_result([(100, None), (40, None)])
     pr = classify(result, board=board)
     assert pr.tier == PriorityTier.TACTICAL
 
