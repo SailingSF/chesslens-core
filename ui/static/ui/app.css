@@ -1,5 +1,23 @@
 /* ChessLens UI — minimal overrides on top of Pico CSS */
 
+/* --- Warm Light Theme --- */
+:root[data-theme="light"] {
+    --pico-background-color: #f5f0e8;
+    --pico-card-background-color: #faf7f2;
+    --pico-color: #2c2418;
+    --pico-muted-color: #9a8d7e;
+    --pico-muted-border-color: #d4c9b8;
+    --pico-primary: #8b6914;
+    --pico-primary-hover: #6d5310;
+    --pico-primary-focus: rgba(139, 105, 20, 0.18);
+    --pico-secondary: #6b5e4f;
+    --pico-secondary-hover: rgba(139, 105, 20, 0.1);
+}
+
+nav {
+    border-bottom: 1px solid #d4c9b8;
+}
+
 /* Board wrapper — give chessboard.js a concrete width */
 #board-wrapper {
     width: 400px;
@@ -9,6 +27,7 @@
 #board .board-b72b1 {
     border: 2px solid var(--pico-muted-border-color);
     border-radius: var(--pico-border-radius);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
 #result-card blockquote {
@@ -20,6 +39,8 @@ footer {
     margin-top: 3rem;
     text-align: center;
     opacity: 0.7;
+    border-top: 1px solid #d4c9b8;
+    padding-top: 1.5rem;
 }
 
 /* --- Eval Graph --- */
@@ -70,19 +91,40 @@ footer {
 #explanation-panel {
     margin-top: 0.75rem;
     padding: 0.75rem 1rem;
-    border: 1px solid var(--pico-muted-border-color);
+    border: none;
+    border-left: 4px solid #c8a84e;
     border-radius: var(--pico-border-radius);
     min-height: 4rem;
-    background: var(--pico-card-background-color);
+    background: #fff9ee;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
 }
 
 .explanation-header {
     margin-bottom: 0.4rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid #e8e0d4;
 }
 
 .explanation-text {
     margin: 0;
-    line-height: 1.5;
+    line-height: 1.6;
+}
+
+.explanation-text ul,
+.explanation-text ol {
+    margin: 0.3rem 0;
+    padding-left: 1.5rem;
+}
+
+.explanation-text strong {
+    color: #2c2418;
+}
+
+.explanation-text code {
+    font-size: 0.88em;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: rgba(139, 105, 20, 0.08);
 }
 
 .cp-value {
@@ -132,11 +174,11 @@ footer {
 }
 
 .move-cell:hover {
-    background: var(--pico-secondary-hover);
+    background: rgba(139, 105, 20, 0.1);
 }
 
 .move-cell.selected {
-    background: var(--pico-primary-focus);
+    background: rgba(139, 105, 20, 0.18);
 }
 
 .move-san {
@@ -195,8 +237,8 @@ footer {
 }
 
 .badge-forced {
-    background: #555;
-    color: #aaa;
+    background: #c4b8a6;
+    color: #6b5e4f;
 }
 
 #analysis-status {
@@ -209,9 +251,11 @@ footer {
 #game-summary {
     margin-top: 1.5rem;
     padding: 1rem 1.25rem;
-    border: 1px solid var(--pico-muted-border-color);
+    border: none;
+    border-left: 4px solid #c8a84e;
     border-radius: var(--pico-border-radius);
-    background: var(--pico-card-background-color);
+    background: #fff9ee;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
 }
 
 #game-summary h3 {
@@ -221,6 +265,12 @@ footer {
 
 #summary-text p {
     line-height: 1.6;
+}
+
+#summary-text > h1:first-child,
+#summary-text > h2:first-child,
+#summary-text > h3:first-child {
+    display: none;
 }
 
 /* --- Markdown in explanations --- */
