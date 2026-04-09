@@ -103,13 +103,12 @@ class TestSigmoidProvider:
         assert wp_2200 > wp_800
 
     def test_elo_scaling_factor_values(self):
-        """Check scaling factor at anchor points (optimized floor=0.75, range=0.15)."""
+        """Check scaling factor at representative Elo values for current config."""
         provider = SigmoidWDLProvider()
-        # With narrow range, all Elo levels cluster between 0.77 and 0.90
-        assert provider._elo_scaling_factor(800) == pytest.approx(0.77, abs=0.02)
-        assert provider._elo_scaling_factor(1500) == pytest.approx(0.825, abs=0.02)
-        assert provider._elo_scaling_factor(2200) == pytest.approx(0.88, abs=0.02)
-        assert provider._elo_scaling_factor(2800) == pytest.approx(0.90, abs=0.02)
+        assert provider._elo_scaling_factor(800) == pytest.approx(0.802, abs=0.02)
+        assert provider._elo_scaling_factor(1500) == pytest.approx(0.854, abs=0.02)
+        assert provider._elo_scaling_factor(2200) == pytest.approx(0.985, abs=0.02)
+        assert provider._elo_scaling_factor(2800) == pytest.approx(0.999, abs=0.01)
 
     def test_no_elo_uses_base_curve(self):
         """Without Elo, scaling factor should be 1.0 (base curve)."""
@@ -197,7 +196,7 @@ class TestClassifyEPLoss:
         assert classify_ep_loss(0.015) == "excellent"
 
     def test_good(self):
-        assert classify_ep_loss(0.02) == "good"
+        assert classify_ep_loss(0.03) == "good"
         assert classify_ep_loss(0.05) == "good"
 
     def test_inaccuracy(self):
@@ -205,9 +204,9 @@ class TestClassifyEPLoss:
         assert classify_ep_loss(0.069) == "inaccuracy"
 
     def test_mistake(self):
-        assert classify_ep_loss(0.07) == "mistake"
         assert classify_ep_loss(0.15) == "mistake"
-        assert classify_ep_loss(0.21) == "mistake"
+        assert classify_ep_loss(0.19) == "mistake"
+        assert classify_ep_loss(0.20) == "blunder"
 
     def test_blunder(self):
         assert classify_ep_loss(0.22) == "blunder"
@@ -313,8 +312,8 @@ class TestBrilliantDetection:
             ep_loss=0.0,
             win_pct_before=0.55,
             win_pct_after=0.70,
-            best_pv=[],
-            best_mate_in=None,
+            played_pv=[],
+            played_mate_in=None,
             side=chess.WHITE,
             elo=1500,
         )
@@ -332,7 +331,7 @@ class TestBrilliantDetection:
         result = detect_brilliant(
             board_before=board, board_after=board_after, move=move,
             ep_loss=0.0, win_pct_before=0.55, win_pct_after=0.70,
-            best_pv=[], best_mate_in=None, side=chess.WHITE,
+            played_pv=[], played_mate_in=None, side=chess.WHITE,
             elo=1500, config=config,
         )
         assert result is False  # no material sacrificed
@@ -346,7 +345,7 @@ class TestBrilliantDetection:
         result = detect_brilliant(
             board_before=board, board_after=board, move=move,
             ep_loss=0.0, win_pct_before=0.95, win_pct_after=0.90,
-            best_pv=[], best_mate_in=None, side=chess.WHITE,
+            played_pv=[], played_mate_in=None, side=chess.WHITE,
             elo=2000, config=config,
         )
         assert result is False
@@ -360,7 +359,7 @@ class TestBrilliantDetection:
         result = detect_brilliant(
             board_before=board, board_after=board, move=move,
             ep_loss=0.0, win_pct_before=0.55, win_pct_after=0.45,
-            best_pv=[], best_mate_in=None, side=chess.WHITE,
+            played_pv=[], played_mate_in=None, side=chess.WHITE,
             elo=1500, config=config,
         )
         assert result is False  # win_pct_after < 0.60 and no mate
@@ -374,7 +373,7 @@ class TestBrilliantDetection:
         result = detect_brilliant(
             board_before=board, board_after=board, move=move,
             ep_loss=0.05, win_pct_before=0.55, win_pct_after=0.70,
-            best_pv=[], best_mate_in=None, side=chess.WHITE,
+            played_pv=[], played_mate_in=None, side=chess.WHITE,
             config=config,
         )
         assert result is False  # ep_loss > 0.02 tolerance
@@ -396,13 +395,35 @@ class TestBrilliantDetection:
             ep_loss=0.0,
             win_pct_before=0.85,
             win_pct_after=0.70,
-            best_pv=[],
-            best_mate_in=None,
+            played_pv=[],
+            played_mate_in=None,
             side=chess.WHITE,
             elo=1400,
             config=config,
         )
         assert result is False
+
+    def test_brilliant_normalizes_black_pov(self):
+        """Black sacrifices should use black's winning chances, not white POV."""
+        config = ClassificationConfig()
+        board_before = chess.Board("4k3/8/8/8/8/8/8/r2qK2r b - - 0 1")
+        board_after = chess.Board("4k3/8/8/8/8/8/8/r3K2r w - - 0 2")
+        move = chess.Move.from_uci("d1d2")
+
+        result = detect_brilliant(
+            board_before=board_before,
+            board_after=board_after,
+            move=move,
+            ep_loss=0.0,
+            win_pct_before=0.45,  # white POV => black already better
+            win_pct_after=0.30,   # white POV => black clearly winning
+            played_pv=[],
+            played_mate_in=None,
+            side=chess.BLACK,
+            elo=1800,
+            config=config,
+        )
+        assert result is True
 
 
 class TestPVCheckmate:
@@ -466,6 +487,8 @@ class TestGreatMoveDetection:
             candidates=candidates,
             provider=provider,
             elo=2000,
+            is_engine_top=True,
+            candidate_gap_cp=100,
         )
         assert result is True
 
@@ -486,6 +509,8 @@ class TestGreatMoveDetection:
             candidates=candidates,
             provider=provider,
             elo=2000,
+            is_engine_top=True,
+            candidate_gap_cp=300,
         )
         assert result is True
 
@@ -509,6 +534,8 @@ class TestGreatMoveDetection:
             candidates=candidates,
             provider=provider,
             elo=1500,
+            is_engine_top=True,
+            candidate_gap_cp=500,
         )
         assert result is True
 
@@ -641,7 +668,7 @@ class TestMissDetection:
             prev_context=prev,
             best_win_pct=0.80,    # best reply would be winning
             played_win_pct=0.50,  # player's reply is only equal
-            ep_loss=0.05,         # not itself a blunder
+            ep_loss=0.10,         # meaningful EP loss but not a blunder label by itself
             elo=2000,
         )
         assert result is True
@@ -658,8 +685,8 @@ class TestMissDetection:
         )
         assert result is False
 
-    def test_miss_not_when_blunder(self):
-        """If the player's move is itself a blunder, label it blunder not miss."""
+    def test_miss_detects_opportunity_even_for_large_ep_loss(self):
+        """detect_miss only detects missed opportunities; label priority is handled upstream."""
         prev = self._make_prev_context(ep_loss=0.25)
         result = detect_miss(
             prev_context=prev,
@@ -668,7 +695,7 @@ class TestMissDetection:
             ep_loss=0.25,  # this is a mistake/blunder (>= ep_mistake threshold)
             elo=2000,
         )
-        assert result is False
+        assert result is True
 
     def test_miss_player_found_winning_move(self):
         """Player's reply IS winning → no miss."""
@@ -693,6 +720,19 @@ class TestMissDetection:
             elo=2000,
         )
         assert result is False
+
+    def test_miss_normalizes_black_pov(self):
+        """Black misses should use black's winning chances, not white POV."""
+        prev = self._make_prev_context(ep_loss=0.25)
+        result = detect_miss(
+            prev_context=prev,
+            best_win_pct=0.25,   # white POV => black would be clearly winning
+            played_win_pct=0.45, # white POV => black only slightly better
+            ep_loss=0.10,
+            side=chess.BLACK,
+            elo=1800,
+        )
+        assert result is True
 
 
 # ===========================================================================
