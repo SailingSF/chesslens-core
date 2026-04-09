@@ -9,11 +9,9 @@ import os
 import subprocess
 import time
 
-import anthropic
 import chess
 import httpx
 import pytest
-import pytest_asyncio
 
 from analysis.context import ContextAssembler
 from analysis.priority import classify
@@ -107,6 +105,7 @@ def context_assembler():
 @pytest.fixture(scope="session")
 def anthropic_client():
     """Real AsyncAnthropic client using the API key from .env / Django settings."""
+    anthropic = pytest.importorskip("anthropic")
     from django.conf import settings
     api_key = settings.ANTHROPIC_API_KEY
     assert api_key and api_key != "sk-ant-...", (

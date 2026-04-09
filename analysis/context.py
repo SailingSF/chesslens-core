@@ -253,10 +253,17 @@ class ContextAssembler:
             board_after = board.copy()
             board_after.push(played_move)
             is_brilliant = detect_brilliant(
-                board_before=board, board_after=board_after, move=played_move,
-                ep_loss=ep_loss_val, win_pct_before=best_win_pct,
-                win_pct_after=played_win_pct, best_pv=best.pv, best_mate_in=best.mate_in,
-                side=side, elo=player_elo, config=self._config,
+                board_before=board,
+                board_after=board_after,
+                move=played_move,
+                ep_loss=ep_loss_val,
+                win_pct_before=best_win_pct,
+                win_pct_after=played_win_pct,
+                played_pv=played_candidate.pv[1:] if played_candidate is not None else [],
+                played_mate_in=played_candidate.mate_in if played_candidate is not None else None,
+                side=side,
+                elo=player_elo,
+                config=self._config,
             )
 
             # Check Great Move — driven by candidate gap + filters

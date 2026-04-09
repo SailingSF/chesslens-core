@@ -191,8 +191,8 @@ def detect_brilliant(
     ep_loss: float,
     win_pct_before: float,
     win_pct_after: float,
-    best_pv: list[chess.Move],
-    best_mate_in: Optional[int],
+    played_pv: list[chess.Move],
+    played_mate_in: Optional[int],
     side: chess.Color,
     elo: Optional[int] = None,
     config: Optional[ClassificationConfig] = None,
@@ -205,6 +205,8 @@ def detect_brilliant(
     in the near-term PV.
     """
     c = config or ClassificationConfig()
+    mover_win_pct_before = _white_pov_to_side_win_pct(win_pct_before, side)
+    mover_win_pct_after = _white_pov_to_side_win_pct(win_pct_after, side)
 
     # Elo-dependent thresholds
     if elo is not None and elo < c.brilliant_low_elo_max_win_pct_threshold:
@@ -221,23 +223,23 @@ def detect_brilliant(
         return False
 
     # Condition 3: not losing after the sacrifice
-    if win_pct_after < c.brilliant_min_win_pct_after:
+    if mover_win_pct_after < c.brilliant_min_win_pct_after:
         return False
 
     # Condition 4: not already completely winning before the sacrifice
-    if win_pct_before > max_win_before:
+    if mover_win_pct_before > max_win_before:
         return False
 
     # Condition 5: material not recovered quickly in PV
-    if _material_recovered_in_pv(board_after, best_pv, side, depth=c.brilliant_pv_depth_check):
+    if _material_recovered_in_pv(board_after, played_pv, side, depth=c.brilliant_pv_depth_check):
         return False
 
     # Condition 6: sacrifice leads to something decisive
     # Check for mate in engine result or in PV positions
-    has_mate = (best_mate_in is not None and best_mate_in > 0)
+    has_mate = (played_mate_in is not None and played_mate_in > 0)
     if not has_mate:
-        has_mate = _pv_has_checkmate(board_after, best_pv, max_depth=c.brilliant_pv_depth_check)
-    if not has_mate and win_pct_after < c.brilliant_decisive_win_pct:
+        has_mate = _pv_has_checkmate(board_after, played_pv, max_depth=c.brilliant_pv_depth_check)
+    if not has_mate and mover_win_pct_after < c.brilliant_decisive_win_pct:
         return False
 
     return True
@@ -493,6 +495,7 @@ def detect_miss(
     opponent just blundered and there was a concrete punishment available.
     """
     c = config or ClassificationConfig()
+    mover_best_win_pct = _white_pov_to_side_win_pct(best_win_pct, side)
 
     # Condition 1: opponent's previous move created an opportunity
     prev_ep_loss = prev_context.ep_loss
@@ -529,7 +532,7 @@ def detect_miss(
                 pass
 
     # 3c: best reply crosses into clearly winning territory
-    if not has_concrete_opportunity and best_win_pct >= c.miss_best_win_pct_threshold:
+    if not has_concrete_opportunity and mover_best_win_pct >= c.miss_best_win_pct_threshold:
         has_concrete_opportunity = True
 
     return has_concrete_opportunity
