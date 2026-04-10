@@ -231,6 +231,13 @@ class ContextAssembler:
             elif candidate_gap_cp is None:
                 # No candidate gap info (single-PV analysis) — promote anyway
                 label = "best"
+        elif label == "best" and not is_engine_top and candidate_gap_cp is not None:
+            if (
+                self._config.best_non_top_excellent_min_gap_cp
+                <= candidate_gap_cp
+                < self._config.best_non_top_excellent_max_gap_cp
+            ):
+                label = "excellent"
 
         # --- Blunder concrete damage gate ---
         # Chess.com requires blunders to involve material loss or forced mate.
@@ -303,8 +310,11 @@ class ContextAssembler:
                     # opportunity" context is strong enough to override
                     # the blunder classification.
                     if (prev_context is not None
-                            and prev_context.ep_loss is not None
-                            and prev_context.ep_loss >= self._config.miss_blunder_override_min_prev_ep):
+                            and (
+                                (prev_context.ep_loss is not None
+                                 and prev_context.ep_loss >= self._config.miss_blunder_override_min_prev_ep)
+                                or prev_context.cp_loss_label in ("mistake", "blunder", "miss")
+                            )):
                         label = "miss"
                 else:
                     label = "miss"
