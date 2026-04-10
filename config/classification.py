@@ -22,12 +22,13 @@ class ClassificationConfig:
     k_base: float = 0.00368
 
     # Elo scaling curve: scaling_factor = floor + range * sigmoid(steepness * (elo - midpoint))
-    # Optimized via 4-phase grid search (43849 runs) against chess.com Classification V2
-    # using per-side Elos (365–1616) and SF16.1 depth-20 multipv-3 caches.
+    # Optimized against the larger external review corpus
+    # (760 games / ~45k comparable moves) using per-side Elos and SF16.1
+    # node-based multi-PV caches.
     elo_scale_floor: float = 0.80
-    elo_scale_range: float = 0.20
-    elo_scale_steepness: float = 0.005
-    elo_scale_midpoint: float = 1700.0
+    elo_scale_range: float = 0.25
+    elo_scale_steepness: float = 0.008
+    elo_scale_midpoint: float = 1250.0
 
     # --- EP thresholds — pinned to chess.com's published table ---
     # https://support.chess.com/en/articles/8572705-how-are-moves-classified
@@ -44,14 +45,20 @@ class ClassificationConfig:
     # At low Elo (below threshold), use a tighter excellent threshold.
     # The flatter sigmoid curve means small EP losses are less meaningful,
     # so chess.com requires moves to be closer to optimal for "excellent".
-    excellent_elo_threshold: int = 1200
-    ep_excellent_low_elo: float = 0.0125
+    excellent_elo_threshold: int = 750
+    ep_excellent_low_elo: float = 0.012
 
     # --- Best move promotion ---
     # Minimum candidate gap (cp) to promote engine-top move from "excellent"
     # to "best". When alternatives are nearly as good (small gap), being the
     # engine's #1 pick is noise, not skill — leave as "excellent".
     best_promotion_min_gap_cp: int = 15
+    # If a move is not the engine's exact top choice but stays in the same
+    # zero-EP bucket, chess.com often prefers "excellent" over "best" when the
+    # candidate gap is small but non-zero. Treat this narrow near-tie band as
+    # excellent rather than best.
+    best_non_top_excellent_min_gap_cp: int = 2
+    best_non_top_excellent_max_gap_cp: int = 30
 
     # --- Brilliant detection ---
     brilliant_ep_tolerance: float = 0.02     # how close to best move
@@ -73,7 +80,7 @@ class ClassificationConfig:
     # Candidate gap threshold: the played move must be the engine's #1 pick
     # AND the gap to the 2nd-best move must exceed this (in centipawns).
     # chess.com data shows great moves have median gap of ~269cp.
-    great_min_candidate_gap_cp: int = 200
+    great_min_candidate_gap_cp: int = 250
     # Capitalization: opponent's prev EP loss must be in this range.
     # Too small = routine best move. Too large (blunder) = exploitation is trivial.
     great_capitalization_min_ep_loss: float = 0.06
@@ -81,11 +88,16 @@ class ClassificationConfig:
     # Candidate-gap relaxation for capitalization cases. Default 0.5 preserves
     # the existing heuristic that these can qualify with about half the normal
     # "only move" gap.
-    great_capitalization_gap_scale: float = 0.5
+    great_capitalization_gap_scale: float = 0.54
     # "Great" should not fire in already decisive positions for either side.
     # (applies to Trigger A candidate-gap only; transition triggers have own bounds)
-    great_min_win_pct_before: float = 0.10
-    great_max_win_pct_before: float = 0.90
+    great_min_win_pct_before: float = 0.15
+    great_max_win_pct_before: float = 0.82
+    # After a clear opponent mistake/blunder, chess.com still awards "great"
+    # for the strongest punishment even when the mover was already somewhat better.
+    great_post_blunder_min_prev_ep_loss: float = 0.20
+    great_post_blunder_min_gap_cp: int = 100
+    great_post_blunder_max_win_pct_before: float = 0.90
     # Trigger C — Defensive equalizer: only saving move from a losing position.
     great_defensive_losing_threshold: float = 0.35   # win_pct_before must be below this
     great_defensive_equal_threshold: float = 0.40     # win_pct_after must reach this
@@ -103,8 +115,8 @@ class ClassificationConfig:
     # Chess.com's miss requires a concrete missed opportunity, not just EP loss.
     # Opponent must have created a real chance (tactical/material), best reply must
     # achieve a concrete gain, and the player must have failed to capitalize.
-    miss_opponent_ep_loss_threshold: float = 0.10  # opponent's prev EP loss
-    miss_min_ep_loss: float = 0.07                 # player's own EP loss
+    miss_opponent_ep_loss_threshold: float = 0.08  # opponent's prev EP loss
+    miss_min_ep_loss: float = 0.08                 # player's own EP loss
     miss_blunder_override_min_prev_ep: float = 0.30  # opponent's prev EP loss required for miss to override blunder
     miss_best_wins_material_depth: int = 4         # half-moves to check material gain in best PV
     miss_best_win_pct_threshold: float = 0.70      # best reply must reach this for "clearly winning" gate
