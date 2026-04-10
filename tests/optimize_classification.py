@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import defaultdict
 import json
 import shutil
 import sys
@@ -57,9 +58,13 @@ from itertools import product
 from pathlib import Path
 from typing import Optional
 
+import chess
+
 # Add project root to path so imports work when run as a script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from analysis.expected_points import SigmoidWDLProvider, classify_ep_loss
+from chess_engine.service import CandidateMove, EngineResult
 from config.classification import ClassificationConfig
 from tests.test_classification_comparison import (
     CLASS_SEVERITY,
@@ -81,6 +86,20 @@ ENGINE_PATHS = {
     "sf17": Path(__file__).resolve().parent.parent.parent / "engines" / "stockfish-17" / "src" / "stockfish",
     "sf18": shutil.which("stockfish") or "stockfish",  # system default
 }
+
+DEFAULT_EXTERNAL_GAMES_DIR = Path(__file__).resolve().parent.parent.parent / "classification_model" / "games"
+DEFAULT_EXTERNAL_MANIFEST_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "classification_model"
+    / "game_review_scrape"
+    / "games_manifest.json"
+)
+DEFAULT_EXTERNAL_CACHE_DIR = (
+    Path(__file__).resolve().parent.parent.parent
+    / "classification_model"
+    / "engine"
+    / "cache"
+)
 
 
 @dataclass(frozen=True)
@@ -147,9 +166,35 @@ def _detect_engine_version(binary_path: str) -> str:
         return "unknown"
 
 
-def _find_game_csvs() -> list[Path]:
-    """Find all game CSV files in the test_games directory."""
-    return sorted(GAMES_DIR.glob("game_*.csv"))
+def _game_id(csv_path: Path) -> str:
+    """Return the numeric/opaque game id without the `game_` prefix."""
+    stem = csv_path.stem
+    return stem[len("game_"):] if stem.startswith("game_") else stem
+
+
+def _count_non_book_moves(csv_path: Path) -> int:
+    """Count comparable moves (non-book, non-terminal) in a chess.com CSV."""
+    return sum(
+        1
+        for move in load_chesscom_csv(csv_path)
+        if not move.is_game_end and move.classification != "book"
+    )
+
+
+def _find_game_csvs(
+    games_dir: Path | None = None,
+    min_non_book_moves: int = 0,
+) -> list[Path]:
+    """Find game CSVs, optionally filtering out ultra-short games."""
+    base_dir = games_dir or GAMES_DIR
+    game_files = sorted(base_dir.glob("game_*.csv"))
+    if min_non_book_moves <= 0:
+        return game_files
+    return [
+        csv_path
+        for csv_path in game_files
+        if _count_non_book_moves(csv_path) >= min_non_book_moves
+    ]
 
 
 def _parse_cache_spec(cache_path: Path) -> CacheSpec | None:
@@ -235,39 +280,81 @@ def _missing_games_for_cache_spec(
     return missing
 
 
-@lru_cache(maxsize=1)
-def _load_game_elos() -> dict[str, dict]:
+@lru_cache(maxsize=None)
+def _load_game_elos(manifest_path: str | None = None) -> dict[str, dict]:
     """
-    Load per-game Elo ratings from game_elos.json.
+    Load per-game Elo ratings.
 
-    Returns dict mapping game stem (e.g. "game_01") to
-    {"white_elo": int, "black_elo": int}.
+    Supported formats:
+      - local test fixture: {"game_01": {"white_elo": ..., "black_elo": ...}}
+      - external manifest: [{"game_id": "...", "white_elo": ..., "black_elo": ...}, ...]
     """
-    elo_file = GAMES_DIR / "game_elos.json"
-    if elo_file.exists():
-        with open(elo_file) as f:
-            return json.load(f)
+    if manifest_path is None:
+        elo_file = GAMES_DIR / "game_elos.json"
+        if elo_file.exists():
+            with open(elo_file) as f:
+                return json.load(f)
+        return {}
+
+    path = Path(manifest_path)
+    if not path.exists():
+        return {}
+
+    with open(path) as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        return data
+
+    if isinstance(data, list):
+        loaded: dict[str, dict] = {}
+        for entry in data:
+            game_id = str(entry.get("game_id", "")).strip()
+            if not game_id:
+                continue
+            white_elo = entry.get("white_elo")
+            black_elo = entry.get("black_elo")
+            if white_elo is None or black_elo is None:
+                continue
+            loaded[game_id] = {
+                "white_elo": int(white_elo),
+                "black_elo": int(black_elo),
+            }
+        return loaded
+
     return {}
 
 
-def _game_elo(csv_path: Path, fallback_elo: int = 820) -> int:
+def _game_elo(
+    csv_path: Path,
+    fallback_elo: int = 820,
+    manifest_path: Path | None = None,
+) -> int:
     """Get the average Elo for a game from metadata, or use fallback."""
-    w, b = _game_elos_by_side(csv_path, fallback_elo)
+    w, b = _game_elos_by_side(csv_path, fallback_elo, manifest_path=manifest_path)
     return (w + b) // 2
 
 
-def _game_elos_by_side(csv_path: Path, fallback_elo: int = 820) -> tuple[int, int]:
+def _game_elos_by_side(
+    csv_path: Path,
+    fallback_elo: int = 820,
+    manifest_path: Path | None = None,
+) -> tuple[int, int]:
     """Get (white_elo, black_elo) for a game from metadata, or use fallback."""
-    elos = _load_game_elos()
+    elos = _load_game_elos(str(manifest_path) if manifest_path is not None else None)
     stem = csv_path.stem
     if stem in elos:
         return elos[stem]["white_elo"], elos[stem]["black_elo"]
+    game_id = _game_id(csv_path)
+    if game_id in elos:
+        return elos[game_id]["white_elo"], elos[game_id]["black_elo"]
     return fallback_elo, fallback_elo
 
 
 def _cache_path(
     csv_path: Path, depth: int, multipv: int,
     engine_tag: str = "sf18", nodes: int | None = None,
+    cache_dir: Path | None = None,
 ) -> Path:
     """
     Return the JSON cache file path for a given game + analysis params.
@@ -285,15 +372,20 @@ def _cache_path(
     else:
         search_tag = f"d{depth}"
 
-    if engine_tag == "stockfish":
-        return csv_path.parent / f"{csv_path.stem}_stockfish_{search_tag}_pv{multipv}.json"
+    base_dir = cache_dir or csv_path.parent
+    flat_external = base_dir / f"{_game_id(csv_path)}.json"
+    if cache_dir is not None and (flat_external.exists() or base_dir != csv_path.parent):
+        return flat_external
 
-    versioned = csv_path.parent / f"{csv_path.stem}_{engine_tag}_{search_tag}_pv{multipv}.json"
+    if engine_tag == "stockfish":
+        return base_dir / f"{csv_path.stem}_stockfish_{search_tag}_pv{multipv}.json"
+
+    versioned = base_dir / f"{csv_path.stem}_{engine_tag}_{search_tag}_pv{multipv}.json"
     if versioned.exists():
         return versioned
     # Legacy fallback (depth-based only): game_01_stockfish_d20_pv3.json
     if nodes is None:
-        legacy = csv_path.parent / f"{csv_path.stem}_stockfish_d{depth}_pv{multipv}.json"
+        legacy = base_dir / f"{csv_path.stem}_stockfish_d{depth}_pv{multipv}.json"
         if legacy.exists():
             return legacy
     # Return versioned path for new cache creation
@@ -576,31 +668,49 @@ def run_comparison_from_cache(
 
     moves = load_chesscom_csv(csv_path)
 
-    engine_results = _load_cached_engine_results(cache_path)
+    cache_data = _load_cached_engine_results(cache_path)
 
     assembler = ContextAssembler(classification_config=config)
     comparisons = []
     board = chess.Board()
     prev_context: AssembledContext | None = None
     engine_idx = 0
+    external_entries = None
+    if isinstance(cache_data, tuple) and cache_data and isinstance(cache_data[0], tuple):
+        external_entries = dict(cache_data)
+    else:
+        engine_results = cache_data
 
     for i, cm in enumerate(moves):
         try:
             played_move = board.parse_san(cm.move_san)
         except ValueError:
-            board.push_san(cm.move_san)
-            continue
+            # Some external review exports contain malformed/desynced SAN.
+            # Stop this game rather than aborting the whole corpus run.
+            break
 
         if cm.is_game_end:
             board.push(played_move)
             continue
 
-        if engine_idx >= len(engine_results):
-            board.push(played_move)
-            continue
+        if external_entries is not None:
+            current_entry = external_entries.get(cm.ply)
+            if current_entry is None:
+                board.push(played_move)
+                prev_context = None
+                continue
+            next_entry = external_entries.get(cm.ply + 1)
+            engine_result = _build_engine_result_from_external_cache(
+                current_entry, played_move, next_entry
+            )
+        else:
+            if engine_idx >= len(engine_results):
+                board.push(played_move)
+                prev_context = None
+                continue
 
-        engine_result = engine_results[engine_idx]
-        engine_idx += 1
+            engine_result = engine_results[engine_idx]
+            engine_idx += 1
 
         move_elo = white_elo if board.turn == chess.WHITE else black_elo
         ctx = assembler.assemble(
@@ -608,6 +718,11 @@ def run_comparison_from_cache(
             player_elo=move_elo,
             prev_context=prev_context,
         )
+
+        if ctx.ep_loss is None and not any((ctx.is_brilliant, ctx.is_great, ctx.is_miss)):
+            prev_context = ctx
+            board.push(played_move)
+            continue
 
         our_class = ctx.cp_loss_label
         chesscom_class = cm.classification
@@ -647,6 +762,12 @@ def _load_cached_engine_results(cache_path: Path) -> tuple:
     with open(cache_path) as f:
         cache_data = json.load(f)
 
+    if isinstance(cache_data, dict):
+        return tuple(
+            (int(ply), entry)
+            for ply, entry in sorted(cache_data.items(), key=lambda item: int(item[0]))
+        )
+
     engine_results = []
     for entry in cache_data:
         candidates = []
@@ -667,6 +788,990 @@ def _load_cached_engine_results(cache_path: Path) -> tuple:
         ))
 
     return tuple(engine_results)
+
+
+_MATE_CP_BASE = 10000
+
+
+def _mate_to_cp(mate_in: int | None) -> int | None:
+    if mate_in is None:
+        return None
+    if mate_in > 0:
+        return _MATE_CP_BASE - mate_in * 10
+    return -_MATE_CP_BASE - mate_in * 10
+
+
+def _parse_external_eval(eval_data: dict | None) -> tuple[int | None, int | None]:
+    """Convert external cache eval blobs to (score_cp, mate_in)."""
+    if not eval_data:
+        return None, None
+    eval_type = eval_data.get("type")
+    value = eval_data.get("value")
+    if value is None:
+        return None, None
+    if eval_type == "cp":
+        return int(value), None
+    if eval_type == "mate":
+        return None, int(value)
+    return None, None
+
+
+def _normalize_external_eval_to_white_pov(
+    score_cp: int | None,
+    mate_in: int | None,
+    side_to_move: chess.Color,
+) -> tuple[int | None, int | None]:
+    """
+    External cache evals are stored from the side-to-move perspective.
+
+    Convert them into the white-perspective convention used everywhere else in
+    this repo, matching `python-chess`'s `score.white()` behavior.
+    """
+    if side_to_move == chess.WHITE:
+        return score_cp, mate_in
+    return (
+        None if score_cp is None else -score_cp,
+        None if mate_in is None else -mate_in,
+    )
+
+
+def _normalize_external_wdl_to_white_pov(
+    wdl: dict | None,
+    side_to_move: chess.Color,
+) -> tuple[int | None, int | None, int | None]:
+    """Convert side-to-move WDL permille values into white perspective."""
+    wdl = wdl or {}
+    win = wdl.get("win")
+    draw = wdl.get("draw")
+    loss = wdl.get("loss")
+    if side_to_move == chess.WHITE:
+        return win, draw, loss
+    return loss, draw, win
+
+
+def _candidate_from_external_top_move(move_info: dict, side_to_move: chess.Color):
+    """Convert a classification_model top-move entry into a CandidateMove."""
+    from chess_engine.service import CandidateMove
+
+    score_cp, mate_in = _parse_external_eval(move_info.get("eval"))
+    score_cp, mate_in = _normalize_external_eval_to_white_pov(
+        score_cp, mate_in, side_to_move
+    )
+    wdl_win, wdl_draw, wdl_loss = _normalize_external_wdl_to_white_pov(
+        move_info.get("wdl"),
+        side_to_move,
+    )
+    return CandidateMove(
+        move=chess.Move.from_uci(move_info["move"]),
+        score_cp=score_cp,
+        mate_in=mate_in,
+        pv=[chess.Move.from_uci(m) for m in move_info.get("pv", [])],
+        wdl_win=wdl_win,
+        wdl_draw=wdl_draw,
+        wdl_loss=wdl_loss,
+    )
+
+
+def _played_candidate_from_next_entry(
+    played_move,
+    next_entry: dict | None,
+):
+    """Use the next cached position to recover the played move's resulting eval."""
+    from chess_engine.service import CandidateMove
+
+    if next_entry is None:
+        return None
+
+    score_cp, mate_in = _parse_external_eval(next_entry.get("eval"))
+    if score_cp is None and mate_in is None:
+        return None
+    next_side_to_move = chess.Board(next_entry["fen"]).turn
+    score_cp, mate_in = _normalize_external_eval_to_white_pov(
+        score_cp, mate_in, next_side_to_move
+    )
+
+    next_top_moves = next_entry.get("top_moves") or []
+    next_top = next_top_moves[0] if next_top_moves else {}
+    next_wdl_win, next_wdl_draw, next_wdl_loss = _normalize_external_wdl_to_white_pov(
+        next_top.get("wdl"),
+        next_side_to_move,
+    )
+    continuation = [chess.Move.from_uci(m) for m in next_top.get("pv", [])]
+    return CandidateMove(
+        move=played_move,
+        score_cp=score_cp,
+        mate_in=mate_in,
+        pv=[played_move, *continuation],
+        wdl_win=next_wdl_win,
+        wdl_draw=next_wdl_draw,
+        wdl_loss=next_wdl_loss,
+    )
+
+
+def _build_engine_result_from_external_cache(
+    entry: dict,
+    played_move,
+    next_entry: dict | None,
+):
+    """Build an EngineResult from the flat external cache format."""
+    from chess_engine.service import EngineResult
+
+    side_to_move = chess.Board(entry["fen"]).turn
+    candidates = [
+        _candidate_from_external_top_move(move_info, side_to_move)
+        for move_info in (entry.get("top_moves") or [])
+        if move_info.get("move")
+    ]
+    if not any(candidate.move == played_move for candidate in candidates):
+        played_candidate = _played_candidate_from_next_entry(played_move, next_entry)
+        if played_candidate is not None:
+            candidates.append(played_candidate)
+
+    if not candidates:
+        raise ValueError(f"No candidates found in external cache entry for ply {entry.get('ply')}")
+
+    depth = max(
+        (int(move_info.get("depth", 0)) for move_info in (entry.get("top_moves") or [])),
+        default=0,
+    )
+    return EngineResult(
+        fen=entry["fen"],
+        depth=depth,
+        candidates=candidates,
+    )
+
+
+@dataclass(frozen=True)
+class MinimalContext:
+    """Prior move context needed for miss/great contextual rules."""
+    ep_loss: float | None
+    label: str
+
+
+@dataclass(frozen=True)
+class ClassificationOutcome:
+    label: str
+    ep_loss: float | None
+    is_brilliant: bool = False
+    is_great: bool = False
+    is_miss: bool = False
+
+    @property
+    def should_record(self) -> bool:
+        return self.ep_loss is not None or self.is_brilliant or self.is_great or self.is_miss
+
+
+@dataclass(frozen=True)
+class MoveFeatures:
+    """Minimal optimizer feature set for one move."""
+    ply: int
+    color: str
+    move_san: str
+    chesscom_class: str
+    player_elo: int | None
+    side: chess.Color
+    best_cp: int | None
+    best_mate_in: int | None
+    best_wdl_win: int | None
+    best_wdl_draw: int | None
+    best_wdl_loss: int | None
+    played_cp: int | None
+    played_mate_in: int | None
+    played_wdl_win: int | None
+    played_wdl_draw: int | None
+    played_wdl_loss: int | None
+    second_cp: int | None
+    second_mate_in: int | None
+    second_wdl_win: int | None
+    second_wdl_draw: int | None
+    second_wdl_loss: int | None
+    is_engine_top: bool
+    candidate_gap_cp: int | None
+    has_played_eval: bool
+    has_concrete_blunder_evidence: bool
+    material_delta_after_move: int
+    captured_piece_value: int
+    move_is_capture: bool
+    is_recapture: bool
+    in_check_before: bool
+    legal_count_if_in_check: int | None
+    response_capture_same_square: bool
+    played_material_recovery_ply: int | None
+    played_checkmate_ply: int | None
+    best_material_gain_ply: int | None
+
+
+@dataclass(frozen=True)
+class CorpusGame:
+    csv_path: Path
+    white_elo: int
+    black_elo: int
+    features: tuple[MoveFeatures, ...]
+
+
+@dataclass(frozen=True)
+class CorpusSession:
+    games: tuple[CorpusGame, ...]
+    build_elapsed_s: float
+    total_moves: int
+
+    def subset(self, target_games: int) -> "CorpusSession":
+        if target_games <= 0 or target_games >= len(self.games):
+            return self
+        sampled = _stratified_game_sample(self.games, target_games)
+        return CorpusSession(
+            games=sampled,
+            build_elapsed_s=self.build_elapsed_s,
+            total_moves=sum(len(game.features) for game in sampled),
+        )
+
+
+class StatsAccumulator:
+    """Streaming accuracy stats so optimizer runs avoid huge comparison lists."""
+
+    def __init__(self, include_breakdown: bool = True):
+        self.include_breakdown = include_breakdown
+        self.total = 0
+        self.matches = 0
+        self.close_misses = 0
+        self.far_misses = 0
+        self.by_class: dict[str, dict] = {}
+
+    def add(self, chesscom_class: str, our_class: str) -> None:
+        if not chesscom_class or chesscom_class == "book":
+            return
+
+        self.total += 1
+        match = chesscom_class == our_class
+        if match:
+            self.matches += 1
+        else:
+            s1 = CLASS_SEVERITY.get(chesscom_class, 10)
+            s2 = CLASS_SEVERITY.get(our_class, 10)
+            if abs(s1 - s2) <= 1:
+                self.close_misses += 1
+            else:
+                self.far_misses += 1
+
+        if chesscom_class not in self.by_class:
+            self.by_class[chesscom_class] = {"total": 0, "matched": 0}
+            if self.include_breakdown:
+                self.by_class[chesscom_class]["our_labels"] = {}
+
+        info = self.by_class[chesscom_class]
+        info["total"] += 1
+        if match:
+            info["matched"] += 1
+        if self.include_breakdown:
+            labels = info["our_labels"]
+            labels[our_class] = labels.get(our_class, 0) + 1
+
+    def to_dict(self) -> dict:
+        accuracy = self.matches / self.total if self.total else 0.0
+        return {
+            "total": self.total,
+            "matches": self.matches,
+            "accuracy": accuracy,
+            "close_misses": self.close_misses,
+            "far_misses": self.far_misses,
+            "by_class": self.by_class,
+        }
+
+
+def _material_balance(board: chess.Board, color: chess.Color) -> int:
+    total = 0
+    for piece_type, value in {
+        chess.PAWN: 1,
+        chess.KNIGHT: 3,
+        chess.BISHOP: 3,
+        chess.ROOK: 5,
+        chess.QUEEN: 9,
+        chess.KING: 0,
+    }.items():
+        total += len(board.pieces(piece_type, color)) * value
+    return total
+
+
+def _piece_value(piece) -> int:
+    if piece is None:
+        return 0
+    values = {
+        chess.PAWN: 1,
+        chess.KNIGHT: 3,
+        chess.BISHOP: 3,
+        chess.ROOK: 5,
+        chess.QUEEN: 9,
+        chess.KING: 0,
+    }
+    return values.get(piece.piece_type, 0)
+
+
+def _earliest_material_recovery_ply(
+    board: chess.Board,
+    pv: list[chess.Move],
+    side: chess.Color,
+    max_depth: int = 8,
+) -> int | None:
+    initial_balance = _material_balance(board, side)
+    temp = board.copy()
+    for idx, move in enumerate(pv[:max_depth], start=1):
+        try:
+            temp.push(move)
+        except Exception:
+            break
+        if _material_balance(temp, side) >= initial_balance:
+            return idx
+    return None
+
+
+def _earliest_checkmate_ply(
+    board: chess.Board,
+    pv: list[chess.Move],
+    max_depth: int = 8,
+) -> int | None:
+    temp = board.copy()
+    for idx, move in enumerate(pv[:max_depth], start=1):
+        try:
+            temp.push(move)
+        except Exception:
+            break
+        if temp.is_checkmate():
+            return idx
+    return None
+
+
+def _earliest_best_material_gain_ply(
+    board_before: chess.Board,
+    best_candidate: CandidateMove | None,
+    side: chess.Color,
+    max_depth: int = 8,
+) -> int | None:
+    if best_candidate is None or not best_candidate.pv:
+        return None
+
+    initial = _material_balance(board_before, side) - _material_balance(board_before, not side)
+    temp = board_before.copy()
+    try:
+        temp.push(best_candidate.move)
+    except Exception:
+        return None
+
+    for idx, move in enumerate(best_candidate.pv[1:max_depth + 1], start=1):
+        try:
+            temp.push(move)
+        except Exception:
+            break
+        current = _material_balance(temp, side) - _material_balance(temp, not side)
+        if current > initial:
+            return idx
+    return None
+
+
+def _has_hanging_capture_after(board_after: chess.Board, side: chess.Color) -> bool:
+    for opp_move in board_after.legal_moves:
+        if not board_after.is_capture(opp_move):
+            continue
+        captured_piece = board_after.piece_at(opp_move.to_square)
+        if captured_piece is None:
+            if board_after.is_en_passant(opp_move):
+                return True
+            continue
+        captured_value = _piece_value(captured_piece)
+        attacker = board_after.piece_at(opp_move.from_square)
+        attacker_value = _piece_value(attacker)
+        if captured_value > attacker_value:
+            return True
+        if captured_value > 0 and not board_after.is_attacked_by(side, opp_move.to_square):
+            return True
+    return False
+
+
+def _is_recapture(board: chess.Board, move: chess.Move) -> bool:
+    if not board.is_capture(move):
+        return False
+    if len(board.move_stack) == 0:
+        return False
+    prev_move = board.move_stack[-1]
+    if prev_move.to_square != move.to_square:
+        return False
+    temp = board.copy()
+    temp.pop()
+    return temp.is_capture(prev_move)
+
+
+def _build_mock_engine_result(
+    board: chess.Board,
+    played_move: chess.Move,
+    best_cp: int | None,
+    best_mate: int | None,
+    played_cp: int | None,
+    played_mate: int | None,
+) -> EngineResult:
+    candidates = []
+    legal_moves = list(board.legal_moves)
+    best_move = (
+        played_move
+        if (best_cp == played_cp and best_mate == played_mate)
+        else legal_moves[0]
+    )
+    if best_move == played_move and len(legal_moves) > 1:
+        if best_cp != played_cp or best_mate != played_mate:
+            best_move = legal_moves[1] if legal_moves[0] == played_move else legal_moves[0]
+
+    candidates.append(CandidateMove(
+        move=best_move,
+        score_cp=best_cp,
+        mate_in=best_mate,
+        pv=[best_move],
+    ))
+
+    if best_move != played_move:
+        candidates.append(CandidateMove(
+            move=played_move,
+            score_cp=played_cp,
+            mate_in=played_mate,
+            pv=[played_move],
+        ))
+
+    return EngineResult(fen=board.fen(), depth=20, candidates=candidates)
+
+
+def _extract_move_features(
+    board: chess.Board,
+    cm: ChessComMove,
+    engine_result: EngineResult,
+    played_move: chess.Move,
+    player_elo: int | None,
+) -> MoveFeatures:
+    best = engine_result.best
+    played_candidate = next((candidate for candidate in engine_result.candidates if candidate.move == played_move), None)
+    second = engine_result.candidates[1] if len(engine_result.candidates) >= 2 else None
+
+    best_cp_raw = best.score_cp if best.score_cp is not None else _mate_to_cp(best.mate_in)
+    second_cp_raw = second.score_cp if second and second.score_cp is not None else _mate_to_cp(second.mate_in if second else None)
+    candidate_gap_cp = None
+    if best_cp_raw is not None and second_cp_raw is not None:
+        candidate_gap_cp = abs(best_cp_raw - second_cp_raw)
+
+    side = board.turn
+    board_after = board.copy()
+    board_after.push(played_move)
+
+    mat_before = _material_balance(board, side)
+    mat_after = _material_balance(board_after, side)
+    opp_mat_before = _material_balance(board, not side)
+    opp_mat_after = _material_balance(board_after, not side)
+
+    move_is_capture = board.is_capture(played_move)
+    captured_piece_value = _piece_value(board.piece_at(played_move.to_square)) if move_is_capture else 0
+    has_concrete_blunder_evidence = False
+    if played_candidate is not None and played_candidate.mate_in is not None and played_candidate.mate_in < 0:
+        has_concrete_blunder_evidence = True
+    if (mat_after - opp_mat_after) < (mat_before - opp_mat_before):
+        has_concrete_blunder_evidence = True
+    if _has_hanging_capture_after(board_after, side):
+        has_concrete_blunder_evidence = True
+
+    played_pv_tail = played_candidate.pv[1:] if played_candidate is not None else []
+    played_material_recovery_ply = _earliest_material_recovery_ply(
+        board_after, played_pv_tail, side
+    ) if played_candidate is not None else None
+    played_checkmate_ply = _earliest_checkmate_ply(
+        board_after, played_pv_tail
+    ) if played_candidate is not None else None
+    best_material_gain_ply = _earliest_best_material_gain_ply(board, best, side)
+
+    return MoveFeatures(
+        ply=cm.ply,
+        color=cm.color,
+        move_san=cm.move_san,
+        chesscom_class=cm.classification,
+        player_elo=player_elo,
+        side=side,
+        best_cp=best.score_cp,
+        best_mate_in=best.mate_in,
+        best_wdl_win=best.wdl_win,
+        best_wdl_draw=best.wdl_draw,
+        best_wdl_loss=best.wdl_loss,
+        played_cp=played_candidate.score_cp if played_candidate is not None else None,
+        played_mate_in=played_candidate.mate_in if played_candidate is not None else None,
+        played_wdl_win=played_candidate.wdl_win if played_candidate is not None else None,
+        played_wdl_draw=played_candidate.wdl_draw if played_candidate is not None else None,
+        played_wdl_loss=played_candidate.wdl_loss if played_candidate is not None else None,
+        second_cp=second.score_cp if second is not None else None,
+        second_mate_in=second.mate_in if second is not None else None,
+        second_wdl_win=second.wdl_win if second is not None else None,
+        second_wdl_draw=second.wdl_draw if second is not None else None,
+        second_wdl_loss=second.wdl_loss if second is not None else None,
+        is_engine_top=(played_move == best.move),
+        candidate_gap_cp=candidate_gap_cp,
+        has_played_eval=(played_candidate is not None),
+        has_concrete_blunder_evidence=has_concrete_blunder_evidence,
+        material_delta_after_move=mat_before - mat_after,
+        captured_piece_value=captured_piece_value,
+        move_is_capture=move_is_capture,
+        is_recapture=_is_recapture(board, played_move),
+        in_check_before=board.is_check(),
+        legal_count_if_in_check=board.legal_moves.count() if board.is_check() else None,
+        response_capture_same_square=(
+            board.is_capture(played_move)
+            and len(board.move_stack) > 0
+            and board.move_stack[-1].to_square == played_move.to_square
+        ),
+        played_material_recovery_ply=played_material_recovery_ply,
+        played_checkmate_ply=played_checkmate_ply,
+        best_material_gain_ply=best_material_gain_ply,
+    )
+
+
+def _build_corpus_session(
+    game_files: list[Path],
+    player_elo: int,
+    use_stockfish: bool,
+    depth: int = 20,
+    multipv: int = 3,
+    engine_tag: str = "sf18",
+    per_game_elo: bool = True,
+    manifest_path: Path | None = None,
+    cache_dir: Path | None = None,
+    nodes: int | None = None,
+) -> CorpusSession:
+    started_at = time.time()
+    games: list[CorpusGame] = []
+    total_moves = 0
+
+    for csv_path in game_files:
+        if per_game_elo:
+            white_elo, black_elo = _game_elos_by_side(
+                csv_path,
+                fallback_elo=player_elo,
+                manifest_path=manifest_path,
+            )
+        else:
+            white_elo = black_elo = player_elo
+
+        moves = load_chesscom_csv(csv_path)
+        board = chess.Board()
+        game_features: list[MoveFeatures] = []
+        engine_idx = 0
+        engine_results = None
+        external_entries = None
+
+        if use_stockfish:
+            cache_path = _cache_path(
+                csv_path,
+                depth,
+                multipv,
+                engine_tag,
+                nodes=nodes,
+                cache_dir=cache_dir,
+            )
+            if not cache_path.exists():
+                continue
+            cache_data = _load_cached_engine_results(cache_path)
+            if isinstance(cache_data, tuple) and cache_data and isinstance(cache_data[0], tuple):
+                external_entries = dict(cache_data)
+            else:
+                engine_results = cache_data
+
+        for i, cm in enumerate(moves):
+            try:
+                played_move = board.parse_san(cm.move_san)
+            except ValueError:
+                break
+
+            if cm.is_game_end:
+                board.push(played_move)
+                continue
+
+            move_elo = white_elo if board.turn == chess.WHITE else black_elo
+
+            if use_stockfish:
+                if external_entries is not None:
+                    current_entry = external_entries.get(cm.ply)
+                    if current_entry is None:
+                        board.push(played_move)
+                        continue
+                    next_entry = external_entries.get(cm.ply + 1)
+                    engine_result = _build_engine_result_from_external_cache(
+                        current_entry, played_move, next_entry
+                    )
+                else:
+                    if engine_results is None or engine_idx >= len(engine_results):
+                        board.push(played_move)
+                        continue
+                    engine_result = engine_results[engine_idx]
+                    engine_idx += 1
+            else:
+                if i == 0:
+                    eval_before_pawns = 0.25
+                    eval_before_mate = None
+                else:
+                    prev = moves[i - 1]
+                    eval_before_pawns = prev.eval_pawns
+                    eval_before_mate = prev.mate_in
+                eval_after_pawns = cm.eval_pawns
+                eval_after_mate = cm.mate_in
+                best_cp = round(eval_before_pawns * 100) if eval_before_pawns is not None else None
+                played_cp = round(eval_after_pawns * 100) if eval_after_pawns is not None else None
+                engine_result = _build_mock_engine_result(
+                    board,
+                    played_move,
+                    best_cp,
+                    eval_before_mate,
+                    played_cp,
+                    eval_after_mate,
+                )
+
+            game_features.append(_extract_move_features(
+                board,
+                cm,
+                engine_result,
+                played_move,
+                move_elo,
+            ))
+            board.push(played_move)
+
+        games.append(CorpusGame(
+            csv_path=csv_path,
+            white_elo=white_elo,
+            black_elo=black_elo,
+            features=tuple(game_features),
+        ))
+        total_moves += len(game_features)
+
+    return CorpusSession(
+        games=tuple(games),
+        build_elapsed_s=time.time() - started_at,
+        total_moves=total_moves,
+    )
+
+
+def _stratified_game_sample(games: tuple[CorpusGame, ...], target_games: int) -> tuple[CorpusGame, ...]:
+    buckets: dict[str, list[CorpusGame]] = defaultdict(list)
+    for game in games:
+        avg_elo = (game.white_elo + game.black_elo) // 2
+        if avg_elo < 600:
+            bucket = "elo_0_599"
+        elif avg_elo < 900:
+            bucket = "elo_600_899"
+        elif avg_elo < 1200:
+            bucket = "elo_900_1199"
+        else:
+            bucket = "elo_1200_plus"
+        buckets[bucket].append(game)
+
+    ordered_buckets = []
+    for key in sorted(buckets):
+        ordered = sorted(
+            buckets[key],
+            key=lambda game: (len(game.features), game.csv_path.name),
+        )
+        ordered_buckets.append(ordered)
+
+    selected: list[CorpusGame] = []
+    seen = set()
+    while len(selected) < target_games:
+        progressed = False
+        for bucket in ordered_buckets:
+            if not bucket:
+                continue
+            index = len(selected) % len(bucket)
+            candidate = bucket[index]
+            if candidate.csv_path not in seen:
+                selected.append(candidate)
+                seen.add(candidate.csv_path)
+                progressed = True
+                if len(selected) >= target_games:
+                    break
+            else:
+                for fallback in bucket:
+                    if fallback.csv_path not in seen:
+                        selected.append(fallback)
+                        seen.add(fallback.csv_path)
+                        progressed = True
+                        break
+                if len(selected) >= target_games:
+                    break
+        if not progressed:
+            break
+
+    if len(selected) < target_games:
+        for game in sorted(games, key=lambda game: (len(game.features), game.csv_path.name)):
+            if game.csv_path in seen:
+                continue
+            selected.append(game)
+            if len(selected) >= target_games:
+                break
+
+    return tuple(selected)
+
+
+def _white_pov_to_side_win_pct(win_pct: float, side: chess.Color) -> float:
+    return 1.0 - win_pct if side == chess.BLACK else win_pct
+
+
+def _is_heavy_piece_sacrifice(feature: MoveFeatures, config: ClassificationConfig) -> bool:
+    if feature.player_elo is not None and feature.player_elo < config.brilliant_low_elo_threshold:
+        min_sacrifice = config.brilliant_low_elo_material_sacrifice
+    else:
+        min_sacrifice = config.brilliant_min_material_sacrifice
+    if feature.material_delta_after_move < min_sacrifice:
+        return False
+    if feature.move_is_capture and feature.captured_piece_value >= feature.material_delta_after_move:
+        return False
+    return True
+
+
+def _detect_brilliant_precomputed(
+    feature: MoveFeatures,
+    config: ClassificationConfig,
+    ep_loss: float,
+    best_win_pct: float,
+    played_win_pct: float,
+) -> bool:
+    mover_win_pct_before = _white_pov_to_side_win_pct(best_win_pct, feature.side)
+    mover_win_pct_after = _white_pov_to_side_win_pct(played_win_pct, feature.side)
+    if feature.player_elo is not None and feature.player_elo < config.brilliant_low_elo_max_win_pct_threshold:
+        max_win_before = config.brilliant_low_elo_max_win_pct_before
+    else:
+        max_win_before = config.brilliant_max_win_pct_before
+    if ep_loss > config.brilliant_ep_tolerance:
+        return False
+    if not _is_heavy_piece_sacrifice(feature, config):
+        return False
+    if mover_win_pct_after < config.brilliant_min_win_pct_after:
+        return False
+    if mover_win_pct_before > max_win_before:
+        return False
+    if (feature.played_material_recovery_ply is not None
+            and feature.played_material_recovery_ply <= config.brilliant_pv_depth_check):
+        return False
+    has_mate = feature.played_mate_in is not None and feature.played_mate_in > 0
+    if not has_mate and feature.played_checkmate_ply is not None:
+        has_mate = feature.played_checkmate_ply <= config.brilliant_pv_depth_check
+    if not has_mate and mover_win_pct_after < config.brilliant_decisive_win_pct:
+        return False
+    return True
+
+
+def _detect_great_precomputed(
+    feature: MoveFeatures,
+    config: ClassificationConfig,
+    prev_context: MinimalContext | None,
+    ep_loss: float,
+    best_win_pct: float,
+    played_win_pct: float,
+) -> bool:
+    mover_win_pct_before = _white_pov_to_side_win_pct(best_win_pct, feature.side)
+    mover_win_pct_after = _white_pov_to_side_win_pct(played_win_pct, feature.side)
+    if not feature.is_engine_top or ep_loss > config.great_ep_tolerance:
+        return False
+    if feature.is_recapture:
+        return False
+    if feature.in_check_before and feature.legal_count_if_in_check is not None:
+        if feature.legal_count_if_in_check <= config.great_max_forced_check_moves:
+            return False
+    if (feature.candidate_gap_cp is not None
+            and feature.candidate_gap_cp >= config.great_min_candidate_gap_cp
+            and feature.best_mate_in is not None
+            and feature.best_mate_in > 0
+            and feature.second_mate_in is None):
+        return True
+    if (feature.candidate_gap_cp is not None
+            and feature.candidate_gap_cp >= config.great_min_candidate_gap_cp
+            and config.great_min_win_pct_before <= mover_win_pct_before <= config.great_max_win_pct_before):
+        return True
+
+    capitalization_gap_cp = max(
+        1,
+        int(round(config.great_min_candidate_gap_cp * config.great_capitalization_gap_scale)),
+    )
+    if (prev_context is not None
+            and feature.candidate_gap_cp is not None
+            and config.great_min_win_pct_before <= mover_win_pct_before <= config.great_max_win_pct_before):
+        prev_ep_loss = prev_context.ep_loss
+        effective_cap_gap = capitalization_gap_cp
+        if feature.response_capture_same_square:
+            effective_cap_gap = max(
+                effective_cap_gap,
+                int(round(capitalization_gap_cp * 1.5)),
+            )
+        if (prev_ep_loss is not None
+                and prev_ep_loss >= config.great_capitalization_min_ep_loss
+                and prev_ep_loss < config.great_capitalization_max_ep_loss
+                and feature.candidate_gap_cp >= effective_cap_gap):
+            return True
+
+    if prev_context is not None and feature.candidate_gap_cp is not None:
+        prev_ep_loss = prev_context.ep_loss
+        effective_gap = config.great_post_blunder_min_gap_cp
+        if feature.response_capture_same_square:
+            effective_gap = max(effective_gap, int(round(effective_gap * 1.5)))
+        if (
+            prev_ep_loss is not None
+            and prev_ep_loss >= config.great_post_blunder_min_prev_ep_loss
+            and prev_context.label in {"mistake", "blunder", "miss"}
+            and feature.candidate_gap_cp >= effective_gap
+            and mover_win_pct_before <= config.great_post_blunder_max_win_pct_before
+        ):
+            return True
+
+    if (feature.candidate_gap_cp is not None
+            and feature.candidate_gap_cp >= config.great_transition_min_gap_cp
+            and mover_win_pct_before < config.great_defensive_losing_threshold
+            and mover_win_pct_after >= config.great_defensive_equal_threshold):
+        return True
+
+    if (feature.candidate_gap_cp is not None
+            and feature.candidate_gap_cp >= config.great_transition_min_gap_cp
+            and config.great_seizing_balanced_lower <= mover_win_pct_before <= config.great_seizing_balanced_upper
+            and mover_win_pct_after >= config.great_seizing_winning_threshold):
+        return True
+
+    return False
+
+
+def _detect_miss_precomputed(
+    feature: MoveFeatures,
+    config: ClassificationConfig,
+    prev_context: MinimalContext,
+    best_win_pct: float,
+    ep_loss: float,
+) -> bool:
+    mover_best_win_pct = _white_pov_to_side_win_pct(best_win_pct, feature.side)
+    prev_ep_loss = prev_context.ep_loss
+    if (
+        (prev_ep_loss is None or prev_ep_loss < config.miss_opponent_ep_loss_threshold)
+        and prev_context.label not in {"mistake", "blunder", "miss"}
+    ):
+        return False
+    if ep_loss < config.miss_min_ep_loss:
+        return False
+
+    has_concrete_opportunity = False
+    if feature.best_mate_in is not None and feature.best_mate_in > 0:
+        has_concrete_opportunity = True
+    if not has_concrete_opportunity and feature.best_material_gain_ply is not None:
+        has_concrete_opportunity = feature.best_material_gain_ply <= config.miss_best_wins_material_depth
+    if not has_concrete_opportunity and mover_best_win_pct >= config.miss_best_win_pct_threshold:
+        has_concrete_opportunity = True
+    return has_concrete_opportunity
+
+
+def classify_precomputed_move(
+    feature: MoveFeatures,
+    config: ClassificationConfig,
+    provider: SigmoidWDLProvider,
+    prev_context: MinimalContext | None,
+) -> ClassificationOutcome:
+    best_win_pct = provider.get_win_pct(
+        cp=feature.best_cp,
+        mate_in=feature.best_mate_in,
+        elo=feature.player_elo,
+        wdl_win=feature.best_wdl_win,
+        wdl_draw=feature.best_wdl_draw,
+        wdl_loss=feature.best_wdl_loss,
+    )
+    played_win_pct = None
+    if feature.has_played_eval:
+        played_win_pct = provider.get_win_pct(
+            cp=feature.played_cp,
+            mate_in=feature.played_mate_in,
+            elo=feature.player_elo,
+            wdl_win=feature.played_wdl_win,
+            wdl_draw=feature.played_wdl_draw,
+            wdl_loss=feature.played_wdl_loss,
+        )
+
+    ep_loss = None
+    if best_win_pct is not None and played_win_pct is not None:
+        if feature.side == chess.WHITE:
+            ep_loss = max(0.0, best_win_pct - played_win_pct)
+        else:
+            ep_loss = max(0.0, played_win_pct - best_win_pct)
+
+    effective_config = config
+    if feature.player_elo is not None and feature.player_elo < config.excellent_elo_threshold:
+        effective_config = replace(config, ep_excellent=config.ep_excellent_low_elo)
+
+    label = classify_ep_loss(ep_loss, effective_config)
+
+    if feature.is_engine_top and label in ("best", "excellent"):
+        if feature.candidate_gap_cp is not None and feature.candidate_gap_cp >= config.best_promotion_min_gap_cp:
+            label = "best"
+        elif feature.candidate_gap_cp is None:
+            label = "best"
+    elif label == "best" and not feature.is_engine_top and feature.candidate_gap_cp is not None:
+        if (
+            config.best_non_top_excellent_min_gap_cp
+            <= feature.candidate_gap_cp
+            < config.best_non_top_excellent_max_gap_cp
+        ):
+            label = "excellent"
+
+    if label == "blunder" and feature.has_played_eval:
+        if not (feature.has_concrete_blunder_evidence or (ep_loss is not None and ep_loss >= 0.35)):
+            label = "mistake"
+
+    is_brilliant = False
+    is_great = False
+    is_miss = False
+    if feature.has_played_eval and ep_loss is not None and best_win_pct is not None and played_win_pct is not None:
+        is_brilliant = _detect_brilliant_precomputed(
+            feature, config, ep_loss, best_win_pct, played_win_pct
+        )
+        is_great = _detect_great_precomputed(
+            feature, config, prev_context, ep_loss, best_win_pct, played_win_pct
+        )
+        if prev_context is not None:
+            is_miss = _detect_miss_precomputed(
+                feature, config, prev_context, best_win_pct, ep_loss
+            )
+
+        if is_brilliant:
+            label = "brilliant"
+        elif is_great and label in ("best", "excellent", "good"):
+            label = "great"
+        elif is_miss:
+            if label == "blunder":
+                if (prev_context is not None
+                        and (
+                            (prev_context.ep_loss is not None
+                             and prev_context.ep_loss >= config.miss_blunder_override_min_prev_ep)
+                            or prev_context.label in {"mistake", "blunder", "miss"}
+                        )):
+                    label = "miss"
+            else:
+                label = "miss"
+
+    return ClassificationOutcome(
+        label=label,
+        ep_loss=ep_loss,
+        is_brilliant=is_brilliant,
+        is_great=is_great,
+        is_miss=is_miss,
+    )
+
+
+def _evaluate_corpus_session(
+    session: CorpusSession,
+    config: ClassificationConfig,
+    include_breakdown: bool = True,
+) -> dict:
+    provider = SigmoidWDLProvider(config)
+    stats = StatsAccumulator(include_breakdown=include_breakdown)
+
+    for game in session.games:
+        prev_context: MinimalContext | None = None
+        for feature in game.features:
+            outcome = classify_precomputed_move(feature, config, provider, prev_context)
+            prev_context = MinimalContext(outcome.ep_loss, outcome.label)
+            if not outcome.should_record:
+                continue
+            stats.add(feature.chesscom_class, outcome.label)
+
+    return stats.to_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -795,6 +1900,8 @@ def _is_valid_phase3_config(config: ClassificationConfig) -> bool:
         and config.elo_scale_floor + config.elo_scale_range <= 1.05
         and config.great_min_candidate_gap_cp >= 50
         and config.best_promotion_min_gap_cp >= 5
+        and config.best_non_top_excellent_min_gap_cp >= 0
+        and config.best_non_top_excellent_min_gap_cp < config.best_non_top_excellent_max_gap_cp
         and config.great_capitalization_min_ep_loss >= 0.02
         and config.great_capitalization_min_ep_loss < config.great_capitalization_max_ep_loss
         and 0.2 <= config.great_capitalization_gap_scale <= 1.0
@@ -837,6 +1944,15 @@ def _top_unique_configs(results: list[OptimizationResult], limit: int) -> list[C
     return top
 
 
+def _unique_optimization_results(results: list[OptimizationResult]) -> list[OptimizationResult]:
+    unique: dict[tuple, OptimizationResult] = {}
+    for score, stats, config in sorted(results, key=lambda x: x[0], reverse=True):
+        key = _config_key(config)
+        if key not in unique:
+            unique[key] = (score, stats, config)
+    return list(unique.values())
+
+
 class OptimizerRunner:
     """Memoized wrapper around `run_single` for repeated optimizer evaluations."""
 
@@ -850,6 +1966,10 @@ class OptimizerRunner:
         engine_tag: str = "sf18",
         nodes: int | None = None,
         per_game_elo: bool = True,
+        manifest_path: Path | None = None,
+        cache_dir: Path | None = None,
+        coarse_sample_games: int = 128,
+        coarse_top_k: int = 24,
     ):
         self.game_files = game_files
         self.player_elo = player_elo
@@ -859,53 +1979,88 @@ class OptimizerRunner:
         self.engine_tag = engine_tag
         self.nodes = nodes
         self.per_game_elo = per_game_elo
+        self.manifest_path = manifest_path
+        self.cache_dir = cache_dir
+        self.coarse_sample_games = coarse_sample_games
+        self.coarse_top_k = coarse_top_k
+        self.session = _build_corpus_session(
+            game_files,
+            player_elo,
+            use_stockfish,
+            depth=depth,
+            multipv=multipv,
+            engine_tag=engine_tag,
+            per_game_elo=per_game_elo,
+            manifest_path=manifest_path,
+            cache_dir=cache_dir,
+            nodes=nodes,
+        )
+        self.sample_session = self.session.subset(coarse_sample_games)
         self._summary_cache: dict[tuple, dict] = {}
         self._detailed_cache: dict[tuple, dict] = {}
+        self._sample_summary_cache: dict[tuple, dict] = {}
+        self._sample_detailed_cache: dict[tuple, dict] = {}
+        self._timings = {
+            "full_evals": 0,
+            "full_eval_s": 0.0,
+            "sample_evals": 0,
+            "sample_eval_s": 0.0,
+        }
 
     def evaluate(
         self,
         config: ClassificationConfig,
         include_breakdown: bool = False,
+        sample: bool = False,
     ) -> dict:
         key = _config_key(config)
+        session = self.sample_session if sample else self.session
+        summary_cache = self._sample_summary_cache if sample else self._summary_cache
+        detailed_cache = self._sample_detailed_cache if sample else self._detailed_cache
+        timing_prefix = "sample" if sample else "full"
 
         if include_breakdown:
-            if key not in self._detailed_cache:
-                self._detailed_cache[key] = run_single(
+            if key not in detailed_cache:
+                started_at = time.time()
+                detailed_cache[key] = _evaluate_corpus_session(
+                    session,
                     config,
-                    self.game_files,
-                    self.player_elo,
-                    self.use_stockfish,
-                    self.depth,
-                    self.multipv,
-                    self.engine_tag,
-                    self.per_game_elo,
-                    nodes=self.nodes,
                     include_breakdown=True,
                 )
-            return self._detailed_cache[key]
+                self._timings[f"{timing_prefix}_evals"] += 1
+                self._timings[f"{timing_prefix}_eval_s"] += time.time() - started_at
+            return detailed_cache[key]
 
-        if key in self._detailed_cache:
-            return self._detailed_cache[key]
+        if key in detailed_cache:
+            return detailed_cache[key]
 
-        if key not in self._summary_cache:
-            self._summary_cache[key] = run_single(
+        if key not in summary_cache:
+            started_at = time.time()
+            summary_cache[key] = _evaluate_corpus_session(
+                session,
                 config,
-                self.game_files,
-                self.player_elo,
-                self.use_stockfish,
-                self.depth,
-                self.multipv,
-                self.engine_tag,
-                self.per_game_elo,
-                nodes=self.nodes,
                 include_breakdown=False,
             )
-        return self._summary_cache[key]
+            self._timings[f"{timing_prefix}_evals"] += 1
+            self._timings[f"{timing_prefix}_eval_s"] += time.time() - started_at
+        return summary_cache[key]
 
     @property
     def unique_evaluations(self) -> int:
         return len(set(self._summary_cache) | set(self._detailed_cache))
+
+    @property
+    def sample_games(self) -> int:
+        return len(self.sample_session.games)
+
+    def timing_summary(self) -> dict[str, float | int]:
+        summary = dict(self._timings)
+        summary["build_elapsed_s"] = self.session.build_elapsed_s
+        summary["full_games"] = len(self.session.games)
+        summary["full_moves"] = self.session.total_moves
+        summary["sample_games"] = len(self.sample_session.games)
+        summary["sample_moves"] = self.sample_session.total_moves
+        return summary
 
 
 def run_single(
@@ -917,34 +2072,104 @@ def run_single(
     multipv: int = 3,
     engine_tag: str = "sf18",
     per_game_elo: bool = True,
+    manifest_path: Path | None = None,
+    cache_dir: Path | None = None,
     nodes: int | None = None,
     include_breakdown: bool = True,
+    session: CorpusSession | None = None,
 ) -> dict:
     """Run comparison across all games with a given config, return aggregate stats.
 
     When per_game_elo=True (default), uses Elo from game_elos.json for each game,
     falling back to player_elo if the game isn't listed.
     """
-    all_comparisons = []
-    for csv_path in game_files:
-        if per_game_elo:
-            w_elo, b_elo = _game_elos_by_side(csv_path, fallback_elo=player_elo)
-        else:
-            w_elo, b_elo = player_elo, player_elo
-        if use_stockfish:
-            cache_path = _cache_path(csv_path, depth, multipv, engine_tag, nodes=nodes)
-            if not cache_path.exists():
-                continue
-            comparisons = run_comparison_from_cache(
-                csv_path, cache_path, config=config,
-                white_elo=w_elo, black_elo=b_elo,
-            )
-        else:
-            # Mock mode uses average Elo (no side distinction in mock data)
-            comparisons = run_comparison(csv_path, config=config, player_elo=(w_elo + b_elo) // 2)
-        all_comparisons.extend(comparisons)
+    corpus = session or _build_corpus_session(
+        game_files,
+        player_elo,
+        use_stockfish,
+        depth=depth,
+        multipv=multipv,
+        engine_tag=engine_tag,
+        per_game_elo=per_game_elo,
+        manifest_path=manifest_path,
+        cache_dir=cache_dir,
+        nodes=nodes,
+    )
+    return _evaluate_corpus_session(corpus, config, include_breakdown=include_breakdown)
 
-    return compute_accuracy_stats(all_comparisons, include_breakdown=include_breakdown)
+
+def _evaluate_config_candidates(
+    configs: list[ClassificationConfig],
+    evaluator: OptimizerRunner,
+    profile: ScoreProfile,
+    label: str,
+    progress_every: int = 25,
+    full_top_k: int | None = None,
+) -> list[OptimizationResult]:
+    """Evaluate many configs using a stratified sample first, then full corpus."""
+    configs = _unique_configs(configs)
+    if not configs:
+        return []
+
+    use_sample = evaluator.sample_games < len(evaluator.game_files)
+    if not use_sample:
+        results: list[OptimizationResult] = []
+        best_score = None
+        started_at = time.time()
+        for done, config in enumerate(configs, start=1):
+            stats = evaluator.evaluate(config)
+            if stats["total"] == 0:
+                continue
+            score = _score_stats(stats, profile)
+            results.append((score, stats, config))
+            if best_score is None or score > best_score:
+                best_score = score
+            if done % progress_every == 0 or done == len(configs):
+                _print_sweep_progress(label, done, len(configs), started_at, best_score, profile)
+        results.sort(key=lambda x: x[0], reverse=True)
+        return results
+
+    started_at = time.time()
+    sample_best = None
+    sample_results: list[OptimizationResult] = []
+    for done, config in enumerate(configs, start=1):
+        stats = evaluator.evaluate(config, sample=True)
+        if stats["total"] == 0:
+            continue
+        score = _score_stats(stats, profile)
+        sample_results.append((score, stats, config))
+        if sample_best is None or score > sample_best:
+            sample_best = score
+        if done % progress_every == 0 or done == len(configs):
+            _print_sweep_progress(
+                f"{label} sample", done, len(configs), started_at, sample_best, profile
+            )
+
+    validate_count = min(full_top_k or evaluator.coarse_top_k, len(sample_results))
+    validated_configs = _top_unique_configs(sample_results, validate_count)
+    print(
+        f"    {label}: validating top {len(validated_configs)} "
+        f"of {len(sample_results)} sample-ranked configs on full corpus"
+    )
+
+    results: list[OptimizationResult] = []
+    best_score = None
+    full_started_at = time.time()
+    for done, config in enumerate(validated_configs, start=1):
+        stats = evaluator.evaluate(config)
+        if stats["total"] == 0:
+            continue
+        score = _score_stats(stats, profile)
+        results.append((score, stats, config))
+        if best_score is None or score > best_score:
+            best_score = score
+        if done % max(1, min(progress_every, 10)) == 0 or done == len(validated_configs):
+            _print_sweep_progress(
+                f"{label} full", done, len(validated_configs), full_started_at, best_score, profile
+            )
+
+    results.sort(key=lambda x: x[0], reverse=True)
+    return results
 
 
 def phase1_sigmoid_sweep(
@@ -957,43 +2182,25 @@ def phase1_sigmoid_sweep(
     steepnesses = [0.003, 0.005, 0.008]
     midpoints = [1000.0, 1250.0, 1500.0, 1750.0]
 
-    results = []
     base = ClassificationConfig()
-    total = sum(
-        1
-        for f, r, s, m in product(floors, ranges, steepnesses, midpoints)
-        if f + r <= 1.05
-    )
-    done = 0
-    started_at = time.time()
-    best_score = None
-
+    configs = []
     for floor, range_, steep, midpoint in product(floors, ranges, steepnesses, midpoints):
         if floor + range_ > 1.05:
             continue
-        done += 1
-        config = replace(
+        configs.append(replace(
             base,
             elo_scale_floor=floor,
             elo_scale_range=range_,
             elo_scale_steepness=steep,
             elo_scale_midpoint=midpoint,
-        )
-        stats = evaluator.evaluate(config)
-        if stats["total"] == 0:
-            continue
-        score = _score_stats(stats, profile)
-        results.append((score, stats, config))
-        if best_score is None or score > best_score:
-            best_score = score
-
-        if done % 10 == 0 or done == total:
-            _print_sweep_progress(
-                f"phase 1 ({profile.key})", done, total, started_at, best_score, profile
-            )
-
-    results.sort(key=lambda x: x[0], reverse=True)
-    return results
+        ))
+    return _evaluate_config_candidates(
+        configs,
+        evaluator,
+        profile,
+        label=f"phase 1 ({profile.key})",
+        progress_every=10,
+    )
 
 
 def phase2_threshold_sweep(
@@ -1011,21 +2218,9 @@ def phase2_threshold_sweep(
     great_defensive_losing = [0.30, 0.35, 0.40]
     great_seizing_winning = [0.65, 0.70, 0.75]
 
-    combos = list(product(
-        candidate_gaps, great_transition_gaps,
-        great_defensive_losing, great_seizing_winning,
-    ))
-    total = len(combos)
-    done = 0
-    started_at = time.time()
-    best_score = None
-
-    results = []
-    for cg, tg, dl, sw in combos:
-        done += 1
-        config = replace(
+    configs = [
+        replace(
             best_sigmoid,
-            # EP thresholds pinned to chess.com published values
             ep_excellent=0.02,
             ep_good=0.05,
             ep_inaccuracy=0.10,
@@ -1035,21 +2230,18 @@ def phase2_threshold_sweep(
             great_defensive_losing_threshold=dl,
             great_seizing_winning_threshold=sw,
         )
-        stats = evaluator.evaluate(config)
-        if stats["total"] == 0:
-            continue
-        score = _score_stats(stats, profile)
-        results.append((score, stats, config))
-        if best_score is None or score > best_score:
-            best_score = score
-
-        if done % 50 == 0 or done == total:
-            _print_sweep_progress(
-                f"phase 2 ({profile.key})", done, total, started_at, best_score, profile
-            )
-
-    results.sort(key=lambda x: x[0], reverse=True)
-    return results
+        for cg, tg, dl, sw in product(
+        candidate_gaps, great_transition_gaps,
+        great_defensive_losing, great_seizing_winning,
+        )
+    ]
+    return _evaluate_config_candidates(
+        configs,
+        evaluator,
+        profile,
+        label=f"phase 2 ({profile.key})",
+        progress_every=50,
+    )
 
 
 def phase2b_special_sweep(
@@ -1057,49 +2249,47 @@ def phase2b_special_sweep(
     evaluator: OptimizerRunner,
     profile: ScoreProfile = STANDARD_SCORE,
 ) -> list[OptimizationResult]:
-    """Sweep miss, best-promotion, and Elo-dependent excellent parameters."""
+    """Coordinate-descent sweep for special move parameters."""
     miss_opp_thresholds = [0.04, 0.06, 0.08, 0.10, 0.15]
     miss_min_eps = [0.04, 0.06, 0.08, 0.10, 0.15]
     miss_best_win_pcts = [0.60, 0.65, 0.70, 0.75, 0.80]
     best_gaps = [15, 20, 30, 50, 75]
+    best_non_top_min_gaps = [0, 5, 10, 15]
+    best_non_top_max_gaps = [20, 30, 40, 50]
     excellent_low_elos = [0.004, 0.006, 0.008, 0.010, 0.012]
     excellent_elo_thresholds = [800, 1000, 1200]
 
-    combos = list(product(
-        miss_opp_thresholds, miss_min_eps, miss_best_win_pcts,
-        best_gaps, excellent_low_elos, excellent_elo_thresholds,
-    ))
-    total = len(combos)
-    done = 0
-    started_at = time.time()
-    best_score = None
+    rounds = [
+        ("miss_opponent_ep_loss_threshold", miss_opp_thresholds),
+        ("miss_min_ep_loss", miss_min_eps),
+        ("miss_best_win_pct_threshold", miss_best_win_pcts),
+        ("best_promotion_min_gap_cp", best_gaps),
+        ("best_non_top_excellent_min_gap_cp", best_non_top_min_gaps),
+        ("best_non_top_excellent_max_gap_cp", best_non_top_max_gaps),
+        ("ep_excellent_low_elo", excellent_low_elos),
+        ("excellent_elo_threshold", excellent_elo_thresholds),
+    ]
 
-    results = []
-    for miss_opp, miss_ep, miss_wp, bg, ele, elet in combos:
-        done += 1
-        config = replace(
-            best_config,
-            miss_opponent_ep_loss_threshold=miss_opp,
-            miss_min_ep_loss=miss_ep,
-            miss_best_win_pct_threshold=miss_wp,
-            best_promotion_min_gap_cp=bg,
-            ep_excellent_low_elo=ele,
-            excellent_elo_threshold=elet,
-        )
-        stats = evaluator.evaluate(config)
-        if stats["total"] == 0:
-            continue
-        score = _score_stats(stats, profile)
-        results.append((score, stats, config))
-        if best_score is None or score > best_score:
-            best_score = score
-
-        if done % 100 == 0 or done == total:
-            _print_sweep_progress(
-                f"phase 2b ({profile.key})", done, total, started_at, best_score, profile
+    results: list[OptimizationResult] = []
+    current = best_config
+    for round_idx in range(2):
+        print(f"    phase 2b ({profile.key}) round {round_idx + 1}/2")
+        for field_name, values in rounds:
+            configs = [replace(current, **{field_name: value}) for value in values]
+            sweep_results = _evaluate_config_candidates(
+                configs,
+                evaluator,
+                profile,
+                label=f"phase 2b {field_name} ({profile.key})",
+                progress_every=max(1, len(configs)),
+                full_top_k=min(len(configs), max(3, evaluator.coarse_top_k // 4)),
             )
+            if not sweep_results:
+                continue
+            results.extend(sweep_results)
+            current = sweep_results[0][2]
 
-    results.sort(key=lambda x: x[0], reverse=True)
+    results = sorted(_unique_optimization_results(results), key=lambda x: x[0], reverse=True)
     return results
 
 
@@ -1138,6 +2328,8 @@ def phase3_fine_tune(
             "great_defensive_losing_threshold": (-0.05, 0.05),
             "great_seizing_winning_threshold": (-0.05, 0.05),
             "best_promotion_min_gap_cp": (-10, 10),
+            "best_non_top_excellent_min_gap_cp": (-5, 5),
+            "best_non_top_excellent_max_gap_cp": (-10, 10),
             "miss_opponent_ep_loss_threshold": (-0.02, 0.02),
             "miss_min_ep_loss": (-0.03, 0.03),
             "miss_best_win_pct_threshold": (-0.05, 0.05),
@@ -1159,6 +2351,8 @@ def phase3_fine_tune(
             "great_defensive_losing_threshold": (-0.03, 0.03),
             "great_seizing_winning_threshold": (-0.03, 0.03),
             "best_promotion_min_gap_cp": (-5, 5),
+            "best_non_top_excellent_min_gap_cp": (-3, 3),
+            "best_non_top_excellent_max_gap_cp": (-5, 5),
             "miss_opponent_ep_loss_threshold": (-0.01, 0.01),
             "miss_min_ep_loss": (-0.015, 0.015),
             "miss_best_win_pct_threshold": (-0.03, 0.03),
@@ -1180,6 +2374,8 @@ def phase3_fine_tune(
             "great_defensive_losing_threshold": (-0.015, 0.015),
             "great_seizing_winning_threshold": (-0.015, 0.015),
             "best_promotion_min_gap_cp": (-2, 2),
+            "best_non_top_excellent_min_gap_cp": (-2, 2),
+            "best_non_top_excellent_max_gap_cp": (-3, 3),
             "miss_opponent_ep_loss_threshold": (-0.005, 0.005),
             "miss_min_ep_loss": (-0.01, 0.01),
             "miss_best_win_pct_threshold": (-0.015, 0.015),
@@ -1431,6 +2627,8 @@ def print_results(
         )
         print(
             f"       specials: best_gap>={config.best_promotion_min_gap_cp}, "
+            f"best_non_top_excellent=[{config.best_non_top_excellent_min_gap_cp}, "
+            f"{config.best_non_top_excellent_max_gap_cp}), "
             f"great_gap>={config.great_min_candidate_gap_cp}, "
             f"great_cap=[{config.great_capitalization_min_ep_loss:.3f}, "
             f"{config.great_capitalization_max_ep_loss:.3f}), "
@@ -1527,6 +2725,8 @@ def print_config_as_python(config: ClassificationConfig, label: str = "Best conf
     print(f"    ep_good             = {config.ep_good}")
     print(f"    ep_inaccuracy       = {config.ep_inaccuracy}")
     print(f"    ep_mistake          = {config.ep_mistake}")
+    print(f"    best_non_top_excellent_min_gap_cp = {config.best_non_top_excellent_min_gap_cp}")
+    print(f"    best_non_top_excellent_max_gap_cp = {config.best_non_top_excellent_max_gap_cp}")
     print(f"    great_min_candidate_gap_cp = {config.great_min_candidate_gap_cp}")
     print(f"    great_capitalization_min_ep_loss = {config.great_capitalization_min_ep_loss}")
     print(f"    great_capitalization_max_ep_loss = {config.great_capitalization_max_ep_loss}")
@@ -1548,7 +2748,7 @@ def print_config_as_python(config: ClassificationConfig, label: str = "Best conf
 
 def cmd_compare(args):
     """Print detailed move-by-move comparison for all games."""
-    game_files = _find_game_csvs()
+    game_files = _find_game_csvs(args.games_dir, min_non_book_moves=args.min_non_book_moves)
     config = ClassificationConfig()
     engine_path, engine_tag = _resolve_engine(args.engine)
     nodes = args.nodes
@@ -1560,18 +2760,31 @@ def cmd_compare(args):
             print(f"Search: nodes={nodes:,}")
         else:
             print(f"Search: depth={args.depth}")
-    print(f"Fallback Elo: {args.elo} (per-game Elos from game_elos.json)")
+    print(f"Fallback Elo: {args.elo} (per-game Elos from {args.manifest_path or 'game_elos.json'})")
+    if args.min_non_book_moves:
+        print(f"Skipping games with < {args.min_non_book_moves} non-book moves")
     print(f"Games: {[f.name for f in game_files]}")
 
     all_comparisons = []
     for csv_path in game_files:
-        w_elo, b_elo = _game_elos_by_side(csv_path, fallback_elo=args.elo)
+        w_elo, b_elo = _game_elos_by_side(
+            csv_path,
+            fallback_elo=args.elo,
+            manifest_path=args.manifest_path,
+        )
         print(f"\n{'='*60}")
         print(f" {csv_path.name}  (White: {w_elo}, Black: {b_elo})")
         print(f"{'='*60}")
 
         if args.stockfish:
-            cache = _cache_path(csv_path, args.depth, args.multipv, engine_tag, nodes=nodes)
+            cache = _cache_path(
+                csv_path,
+                args.depth,
+                args.multipv,
+                engine_tag,
+                nodes=nodes,
+                cache_dir=args.cache_dir,
+            )
             if not cache.exists():
                 print(f"  No cache at {cache.name} -- run --generate-cache first")
                 continue
@@ -1599,7 +2812,7 @@ def cmd_compare(args):
 def cmd_generate_cache(args):
     """Generate Stockfish caches for all game files."""
     nodes = args.nodes
-    game_files = _find_game_csvs()
+    game_files = _find_game_csvs(args.games_dir, min_non_book_moves=args.min_non_book_moves)
 
     if args.fill_missing:
         specs = _collect_existing_cache_specs(game_files)
@@ -1664,7 +2877,7 @@ def cmd_generate_cache(args):
 
 def cmd_sweep_engine(args):
     """Sweep depth/nodes/multipv/engine-version to find which best match chess.com."""
-    game_files = _find_game_csvs()
+    game_files = _find_game_csvs(args.games_dir, min_non_book_moves=args.min_non_book_moves)
     config = ClassificationConfig()
 
     depths = [int(d) for d in args.depths.split(",")] if args.depths else None
@@ -1678,6 +2891,8 @@ def cmd_sweep_engine(args):
     print(f"  MultiPVs: {multipvs or [2, 3, 4, 5]}")
     print(f"  Engine versions: {engine_tags or '(auto-discover from caches)'}")
     print(f"  Elo: {args.elo}")
+    if args.min_non_book_moves:
+        print(f"  Skipping games with < {args.min_non_book_moves} non-book moves")
     print(f"  Games: {[f.name for f in game_files]}")
 
     # Check available caches (both depth-based and node-based)
@@ -1706,7 +2921,7 @@ def cmd_sweep_engine(args):
 
 def cmd_optimize(args):
     """Run 3-phase parameter optimization (sigmoid + thresholds + fine-tune)."""
-    game_files = _find_game_csvs()
+    game_files = _find_game_csvs(args.games_dir, min_non_book_moves=args.min_non_book_moves)
     engine_path, engine_tag = _resolve_engine(args.engine)
     nodes = args.nodes
     evaluator = OptimizerRunner(
@@ -1717,6 +2932,10 @@ def cmd_optimize(args):
         multipv=args.multipv,
         engine_tag=engine_tag,
         nodes=nodes,
+        manifest_path=args.manifest_path,
+        cache_dir=args.cache_dir,
+        coarse_sample_games=args.coarse_sample_games,
+        coarse_top_k=args.coarse_top_k,
     )
     if args.score_mode == "both":
         score_profiles = [STANDARD_SCORE, WEIGHTED_SCORE]
@@ -1726,21 +2945,46 @@ def cmd_optimize(args):
     print(f"\nMode: {mode}")
     if args.stockfish:
         print(f"Engine: {engine_tag} ({engine_path})")
-    print(f"Fallback Elo: {args.elo} (per-game Elos from game_elos.json)")
+    print(f"Fallback Elo: {args.elo} (per-game Elos from {args.manifest_path or 'game_elos.json'})")
+    if args.min_non_book_moves:
+        print(f"Skipping games with < {args.min_non_book_moves} non-book moves")
     if args.stockfish:
         if nodes:
             print(f"Engine params: nodes={nodes:,}, multipv={args.multipv}")
         else:
             print(f"Engine params: depth={args.depth}, multipv={args.multipv}")
+    timing = evaluator.timing_summary()
+    print(
+        f"Corpus precompute: {timing['build_elapsed_s']:.1f}s "
+        f"for {timing['full_games']} games / {timing['full_moves']} moves"
+    )
+    if timing["sample_games"] < timing["full_games"]:
+        print(
+            f"Coarse sample: {timing['sample_games']} games / {timing['sample_moves']} moves "
+            f"(top {args.coarse_top_k} full-corpus validations per sweep)"
+        )
+    else:
+        print("Coarse sample: disabled (sample covers full corpus)")
     print(f"Games:")
     for gf in game_files:
-        w, b = _game_elos_by_side(gf, fallback_elo=args.elo)
+        w, b = _game_elos_by_side(
+            gf,
+            fallback_elo=args.elo,
+            manifest_path=args.manifest_path,
+        )
         print(f"  {gf.name} (W: {w}, B: {b})")
 
     if args.stockfish:
         missing = []
         for gf in game_files:
-            cache = _cache_path(gf, args.depth, args.multipv, engine_tag, nodes=nodes)
+            cache = _cache_path(
+                gf,
+                args.depth,
+                args.multipv,
+                engine_tag,
+                nodes=nodes,
+                cache_dir=args.cache_dir,
+            )
             if cache.exists():
                 print(f"  + {cache.name}")
             else:
@@ -1757,6 +3001,18 @@ def cmd_optimize(args):
 
     start = time.time()
     profile_summaries = []
+    baseline_started_at = time.time()
+    baseline_stats = evaluator.evaluate(ClassificationConfig())
+    baseline_elapsed = time.time() - baseline_started_at
+    print(
+        f"\nTiming checkpoint: baseline full-corpus eval "
+        f"{baseline_elapsed:.2f}s ({baseline_stats['total']} comparable moves)"
+    )
+    if timing["sample_games"] < timing["full_games"]:
+        sample_started_at = time.time()
+        evaluator.evaluate(ClassificationConfig(), sample=True)
+        sample_elapsed = time.time() - sample_started_at
+        print(f"Timing checkpoint: coarse-sample eval {sample_elapsed:.2f}s")
 
     for profile in score_profiles:
         print(f"\n{'='*80}")
@@ -1869,6 +3125,17 @@ def cmd_optimize(args):
             f"  {profile.label:<8} {_describe_stats(stats, profile)}  "
             f"delta_exact={summary['delta']:+.1%}"
         )
+    timing = evaluator.timing_summary()
+    if timing["full_evals"]:
+        print(
+            f"  Avg full eval: {timing['full_eval_s'] / timing['full_evals']:.2f}s "
+            f"across {timing['full_evals']} runs"
+        )
+    if timing["sample_evals"]:
+        print(
+            f"  Avg sample eval: {timing['sample_eval_s'] / timing['sample_evals']:.2f}s "
+            f"across {timing['sample_evals']} runs"
+        )
     print()
 
 
@@ -1972,11 +3239,47 @@ multi-PV 2-3, Expected Points classification with Elo-adjusted sigmoid.
         help="Player Elo for classification (default: 820)",
     )
     parser.add_argument(
+        "--games-dir",
+        type=Path,
+        default=GAMES_DIR,
+        help="Directory containing chess.com review CSVs (default: tests/test_games)",
+    )
+    parser.add_argument(
+        "--manifest-path",
+        type=Path,
+        default=None,
+        help="Optional manifest/elo JSON for per-game white_elo/black_elo lookup",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Optional cache directory; supports flat <game_id>.json caches",
+    )
+    parser.add_argument(
+        "--min-non-book-moves",
+        type=int,
+        default=0,
+        help="Skip games with fewer than this many comparable non-book moves",
+    )
+    parser.add_argument(
         "--score-mode",
         type=str,
         choices=["standard", "weighted", "both"],
         default="both",
         help="Optimization objective: standard accuracy, weighted per-class recall, or both (default: both)",
+    )
+    parser.add_argument(
+        "--coarse-sample-games",
+        type=int,
+        default=128,
+        help="Number of games in the stratified coarse-search sample (default: 128)",
+    )
+    parser.add_argument(
+        "--coarse-top-k",
+        type=int,
+        default=24,
+        help="How many sample-ranked configs to validate on the full corpus (default: 24)",
     )
 
     # Engine sweep options

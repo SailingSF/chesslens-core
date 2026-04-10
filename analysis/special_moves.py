@@ -303,6 +303,15 @@ def _is_recapture(board: chess.Board, move: chess.Move) -> bool:
     return temp.is_capture(prev_move)
 
 
+def _is_response_capture_same_square(board: chess.Board, move: chess.Move) -> bool:
+    """Return True when capturing the piece that just moved onto that square."""
+    return (
+        board.is_capture(move)
+        and len(board.move_stack) > 0
+        and board.move_stack[-1].to_square == move.to_square
+    )
+
+
 def _white_pov_to_side_win_pct(
     win_pct: float,
     side: Optional[chess.Color],
@@ -411,10 +420,7 @@ def detect_great(
             and c.great_min_win_pct_before <= mover_win_pct_before <= c.great_max_win_pct_before):
         prev_ep_loss = prev_context.ep_loss
         effective_cap_gap = capitalization_gap_cp
-        if (board is not None and move is not None
-                and board.is_capture(move)
-                and len(board.move_stack) > 0
-                and board.move_stack[-1].to_square == move.to_square):
+        if board is not None and move is not None and _is_response_capture_same_square(board, move):
             # Capture responds to opponent's last move on the same square —
             # more obvious, require 1.5x the normal capitalization gap.
             effective_cap_gap = max(
@@ -425,6 +431,24 @@ def detect_great(
                 and prev_ep_loss >= c.great_capitalization_min_ep_loss
                 and prev_ep_loss < c.great_capitalization_max_ep_loss
                 and candidate_gap_cp >= effective_cap_gap):
+            return True
+
+    # B2. Strong capitalization after a clear mistake/blunder. These are often
+    #     marked "great" even when the mover was already somewhat better before
+    #     the punishment, provided the reply is still uniquely strong.
+    if prev_context is not None and candidate_gap_cp is not None:
+        prev_ep_loss = prev_context.ep_loss
+        prev_label = prev_context.cp_loss_label
+        effective_gap = c.great_post_blunder_min_gap_cp
+        if board is not None and move is not None and _is_response_capture_same_square(board, move):
+            effective_gap = max(effective_gap, int(round(effective_gap * 1.5)))
+        if (
+            prev_ep_loss is not None
+            and prev_ep_loss >= c.great_post_blunder_min_prev_ep_loss
+            and prev_label in {"mistake", "blunder", "miss"}
+            and candidate_gap_cp >= effective_gap
+            and mover_win_pct_before <= c.great_post_blunder_max_win_pct_before
+        ):
             return True
 
     # C. Defensive equalizer: position was losing, this move restores equality.
@@ -499,7 +523,11 @@ def detect_miss(
 
     # Condition 1: opponent's previous move created an opportunity
     prev_ep_loss = prev_context.ep_loss
-    if prev_ep_loss is None or prev_ep_loss < c.miss_opponent_ep_loss_threshold:
+    prev_label = prev_context.cp_loss_label
+    if (
+        (prev_ep_loss is None or prev_ep_loss < c.miss_opponent_ep_loss_threshold)
+        and prev_label not in {"mistake", "blunder", "miss"}
+    ):
         return False
 
     # Condition 2: player's move loses meaningful expected points
