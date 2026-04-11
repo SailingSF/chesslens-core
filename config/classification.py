@@ -25,10 +25,10 @@ class ClassificationConfig:
     # Optimized against the larger external review corpus
     # (760 games / ~45k comparable moves) using per-side Elos and SF16.1
     # node-based multi-PV caches.
-    elo_scale_floor: float = 0.80
-    elo_scale_range: float = 0.25
-    elo_scale_steepness: float = 0.008
-    elo_scale_midpoint: float = 1250.0
+    elo_scale_floor: float = 0.85
+    elo_scale_range: float = 0.2
+    elo_scale_steepness: float = 0.003
+    elo_scale_midpoint: float = 850.0
 
     # --- EP thresholds — pinned to chess.com's published table ---
     # https://support.chess.com/en/articles/8572705-how-are-moves-classified
@@ -37,8 +37,8 @@ class ClassificationConfig:
     ep_best: float = 0.00
     ep_excellent: float = 0.02
     ep_good: float = 0.05
-    ep_inaccuracy: float = 0.10
-    ep_mistake: float = 0.20
+    ep_inaccuracy: float = 0.1
+    ep_mistake: float = 0.2
     # anything above ep_mistake = blunder (but see blunder gate below)
 
     # --- Elo-dependent excellent threshold ---
@@ -71,7 +71,7 @@ class ClassificationConfig:
     brilliant_low_elo_threshold: int = 1200
     # At lower Elo, chess.com is a bit more permissive about awarding "brilliant"
     # in already-good positions, but still not in completely won ones.
-    brilliant_low_elo_max_win_pct_before: float = 0.90
+    brilliant_low_elo_max_win_pct_before: float = 0.9
     brilliant_low_elo_max_win_pct_threshold: int = 1500
 
     # --- Great move detection ---
@@ -115,8 +115,8 @@ class ClassificationConfig:
     # Chess.com's miss requires a concrete missed opportunity, not just EP loss.
     # Opponent must have created a real chance (tactical/material), best reply must
     # achieve a concrete gain, and the player must have failed to capitalize.
-    miss_opponent_ep_loss_threshold: float = 0.08  # opponent's prev EP loss
-    miss_min_ep_loss: float = 0.08                 # player's own EP loss
+    miss_opponent_ep_loss_threshold: float = 0.1  # opponent's prev EP loss
+    miss_min_ep_loss: float = 0.1                 # player's own EP loss
     miss_blunder_override_min_prev_ep: float = 0.30  # opponent's prev EP loss required for miss to override blunder
     miss_best_wins_material_depth: int = 4         # half-moves to check material gain in best PV
     miss_best_win_pct_threshold: float = 0.70      # best reply must reach this for "clearly winning" gate
