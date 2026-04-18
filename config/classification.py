@@ -59,6 +59,12 @@ class ClassificationConfig:
     # excellent rather than best.
     best_non_top_excellent_min_gap_cp: int = 2
     best_non_top_excellent_max_gap_cp: int = 30
+    # Engine-equivalent safeguard: don't demote non-top bests to excellent when
+    # the raw centipawn loss is below this value, even if the candidate gap
+    # falls in the demotion band. Drill-down on chess.com labels shows a
+    # large pocket of rank-2 moves with cp_loss ~7 and gap ~6 that CC still
+    # calls "best" — the engine considers them equivalent to the top pick.
+    best_non_top_excellent_min_cp_loss: int = 5
 
     # --- Brilliant detection ---
     brilliant_ep_tolerance: float = 0.02     # how close to best move
@@ -98,18 +104,9 @@ class ClassificationConfig:
     great_post_blunder_min_prev_ep_loss: float = 0.20
     great_post_blunder_min_gap_cp: int = 100
     great_post_blunder_max_win_pct_before: float = 0.90
-    # Trigger C — Defensive equalizer: only saving move from a losing position.
-    great_defensive_losing_threshold: float = 0.35   # win_pct_before must be below this
-    great_defensive_equal_threshold: float = 0.40     # win_pct_after must reach this
-    # Trigger D — Seizing move: breakthrough from balanced to clearly winning.
-    great_seizing_balanced_lower: float = 0.35
-    great_seizing_balanced_upper: float = 0.65
-    great_seizing_winning_threshold: float = 0.70     # win_pct_after must reach this
     # When in check with this many or fewer legal moves, the response is
     # forced and should not qualify as "great" regardless of candidate gap.
     great_max_forced_check_moves: int = 3
-    # Minimum candidate gap for transition triggers (relaxed vs Trigger A's 200cp).
-    great_transition_min_gap_cp: int = 50
 
     # --- Miss detection ---
     # Chess.com's miss requires a concrete missed opportunity, not just EP loss.

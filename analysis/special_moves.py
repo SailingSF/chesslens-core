@@ -356,15 +356,11 @@ def detect_great(
          rate and huge candidate gaps.
       B. Capitalization: opponent's previous move was a non-trivial mistake
          and the player found the best response with a significant gap.
-      C. Defensive equalizer: only saving move from a losing position that
-         restores equality. Relaxed candidate gap requirement.
-      D. Seizing move: breakthrough from a balanced position into clearly
-         winning territory. Relaxed candidate gap requirement.
+      E. Mate-finding: the best move leads to forced mate and alternatives don't.
     """
     c = config or ClassificationConfig()
     side_to_move = side if side is not None else (board.turn if board is not None else None)
     mover_win_pct_before = _white_pov_to_side_win_pct(win_pct_before, side_to_move)
-    mover_win_pct_after = _white_pov_to_side_win_pct(win_pct_after, side_to_move)
 
     # Must be the engine's top choice (or very near-best) for any "great"
     if not is_engine_top or ep_loss > c.great_ep_tolerance:
@@ -450,22 +446,6 @@ def detect_great(
             and mover_win_pct_before <= c.great_post_blunder_max_win_pct_before
         ):
             return True
-
-    # C. Defensive equalizer: position was losing, this move restores equality.
-    #    The "greatness" comes from the position swing, not candidate gap alone.
-    if (candidate_gap_cp is not None
-            and candidate_gap_cp >= c.great_transition_min_gap_cp
-            and mover_win_pct_before < c.great_defensive_losing_threshold
-            and mover_win_pct_after >= c.great_defensive_equal_threshold):
-        return True
-
-    # D. Seizing move: position was balanced, this move creates a clearly
-    #    winning advantage. Breakthrough moves that change the game result.
-    if (candidate_gap_cp is not None
-            and candidate_gap_cp >= c.great_transition_min_gap_cp
-            and c.great_seizing_balanced_lower <= mover_win_pct_before <= c.great_seizing_balanced_upper
-            and mover_win_pct_after >= c.great_seizing_winning_threshold):
-        return True
 
     return False
 

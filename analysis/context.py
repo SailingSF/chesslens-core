@@ -232,11 +232,18 @@ class ContextAssembler:
                 # No candidate gap info (single-PV analysis) — promote anyway
                 label = "best"
         elif label == "best" and not is_engine_top and candidate_gap_cp is not None:
-            if (
+            in_gap_band = (
                 self._config.best_non_top_excellent_min_gap_cp
                 <= candidate_gap_cp
                 < self._config.best_non_top_excellent_max_gap_cp
-            ):
+            )
+            # Engine-equivalent: very small cp_loss means the move is practically
+            # as good as #1; keep it labeled "best" to match chess.com.
+            cp_loss_meaningful = (
+                cp_loss is None
+                or cp_loss >= self._config.best_non_top_excellent_min_cp_loss
+            )
+            if in_gap_band and cp_loss_meaningful:
                 label = "excellent"
 
         # --- Blunder concrete damage gate ---

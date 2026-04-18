@@ -1564,7 +1564,6 @@ def _detect_great_precomputed(
     played_win_pct: float,
 ) -> bool:
     mover_win_pct_before = _white_pov_to_side_win_pct(best_win_pct, feature.side)
-    mover_win_pct_after = _white_pov_to_side_win_pct(played_win_pct, feature.side)
     if not feature.is_engine_top or ep_loss > config.great_ep_tolerance:
         return False
     if feature.is_recapture:
@@ -1616,18 +1615,6 @@ def _detect_great_precomputed(
             and mover_win_pct_before <= config.great_post_blunder_max_win_pct_before
         ):
             return True
-
-    if (feature.candidate_gap_cp is not None
-            and feature.candidate_gap_cp >= config.great_transition_min_gap_cp
-            and mover_win_pct_before < config.great_defensive_losing_threshold
-            and mover_win_pct_after >= config.great_defensive_equal_threshold):
-        return True
-
-    if (feature.candidate_gap_cp is not None
-            and feature.candidate_gap_cp >= config.great_transition_min_gap_cp
-            and config.great_seizing_balanced_lower <= mover_win_pct_before <= config.great_seizing_balanced_upper
-            and mover_win_pct_after >= config.great_seizing_winning_threshold):
-        return True
 
     return False
 
@@ -1703,11 +1690,17 @@ def classify_precomputed_move(
         elif feature.candidate_gap_cp is None:
             label = "best"
     elif label == "best" and not feature.is_engine_top and feature.candidate_gap_cp is not None:
-        if (
+        in_gap_band = (
             config.best_non_top_excellent_min_gap_cp
             <= feature.candidate_gap_cp
             < config.best_non_top_excellent_max_gap_cp
-        ):
+        )
+        if feature.best_cp is not None and feature.played_cp is not None:
+            cp_loss = abs(feature.best_cp - feature.played_cp)
+            cp_loss_meaningful = cp_loss >= config.best_non_top_excellent_min_cp_loss
+        else:
+            cp_loss_meaningful = True
+        if in_gap_band and cp_loss_meaningful:
             label = "excellent"
 
     if label == "blunder" and feature.has_played_eval:
@@ -1911,9 +1904,6 @@ def _is_valid_phase3_config(config: ClassificationConfig) -> bool:
         and config.ep_excellent_low_elo > 0
         and 0.6 <= config.brilliant_low_elo_max_win_pct_before <= 0.98
         and 600 <= config.elo_scale_midpoint <= 2200
-        and config.great_transition_min_gap_cp >= 10
-        and 0.1 <= config.great_defensive_losing_threshold <= 0.5
-        and 0.5 <= config.great_seizing_winning_threshold <= 0.9
         and 0.3 <= config.miss_best_win_pct_threshold <= 0.95
     )
 
@@ -2214,9 +2204,6 @@ def phase2_threshold_sweep(
     Instead, sweep candidate gap and great move transition parameters.
     """
     candidate_gaps = [100, 150, 200, 250]
-    great_transition_gaps = [30, 50, 75, 100]
-    great_defensive_losing = [0.30, 0.35, 0.40]
-    great_seizing_winning = [0.65, 0.70, 0.75]
 
     configs = [
         replace(
@@ -2226,14 +2213,8 @@ def phase2_threshold_sweep(
             ep_inaccuracy=0.10,
             ep_mistake=0.20,
             great_min_candidate_gap_cp=cg,
-            great_transition_min_gap_cp=tg,
-            great_defensive_losing_threshold=dl,
-            great_seizing_winning_threshold=sw,
         )
-        for cg, tg, dl, sw in product(
-        candidate_gaps, great_transition_gaps,
-        great_defensive_losing, great_seizing_winning,
-        )
+        for cg in candidate_gaps
     ]
     return _evaluate_config_candidates(
         configs,
@@ -2324,9 +2305,6 @@ def phase3_fine_tune(
             "great_capitalization_gap_scale": (-0.15, 0.15),
             "great_min_win_pct_before": (-0.05, 0.05),
             "great_max_win_pct_before": (-0.05, 0.05),
-            "great_transition_min_gap_cp": (-15, 15),
-            "great_defensive_losing_threshold": (-0.05, 0.05),
-            "great_seizing_winning_threshold": (-0.05, 0.05),
             "best_promotion_min_gap_cp": (-10, 10),
             "best_non_top_excellent_min_gap_cp": (-5, 5),
             "best_non_top_excellent_max_gap_cp": (-10, 10),
@@ -2347,9 +2325,6 @@ def phase3_fine_tune(
             "great_capitalization_gap_scale": (-0.08, 0.08),
             "great_min_win_pct_before": (-0.03, 0.03),
             "great_max_win_pct_before": (-0.03, 0.03),
-            "great_transition_min_gap_cp": (-8, 8),
-            "great_defensive_losing_threshold": (-0.03, 0.03),
-            "great_seizing_winning_threshold": (-0.03, 0.03),
             "best_promotion_min_gap_cp": (-5, 5),
             "best_non_top_excellent_min_gap_cp": (-3, 3),
             "best_non_top_excellent_max_gap_cp": (-5, 5),
@@ -2370,9 +2345,6 @@ def phase3_fine_tune(
             "great_capitalization_gap_scale": (-0.04, 0.04),
             "great_min_win_pct_before": (-0.015, 0.015),
             "great_max_win_pct_before": (-0.015, 0.015),
-            "great_transition_min_gap_cp": (-4, 4),
-            "great_defensive_losing_threshold": (-0.015, 0.015),
-            "great_seizing_winning_threshold": (-0.015, 0.015),
             "best_promotion_min_gap_cp": (-2, 2),
             "best_non_top_excellent_min_gap_cp": (-2, 2),
             "best_non_top_excellent_max_gap_cp": (-3, 3),

@@ -468,32 +468,8 @@ class TestGreatMoveDetection:
             ep_loss=ep_loss,
         )
 
-    def test_turning_move(self):
-        """Position swings from losing to equal → great move."""
-        provider = SigmoidWDLProvider()
-        board = chess.Board()
-        moves = list(board.legal_moves)
-
-        # Create candidates where best move is clearly better
-        candidates = [
-            CandidateMove(move=moves[0], score_cp=100, mate_in=None, pv=[moves[0]]),
-            CandidateMove(move=moves[1], score_cp=-200, mate_in=None, pv=[moves[1]]),
-        ]
-
-        result = detect_great(
-            ep_loss=0.0,
-            win_pct_before=0.25,   # losing
-            win_pct_after=0.55,    # now equal/better
-            candidates=candidates,
-            provider=provider,
-            elo=2000,
-            is_engine_top=True,
-            candidate_gap_cp=100,
-        )
-        assert result is True
-
     def test_seizing_move(self):
-        """Position swings from equal to winning → great move."""
+        """Large candidate gap in a balanced position → great via Trigger A."""
         provider = SigmoidWDLProvider()
         board = chess.Board()
         moves = list(board.legal_moves)
@@ -504,8 +480,8 @@ class TestGreatMoveDetection:
 
         result = detect_great(
             ep_loss=0.0,
-            win_pct_before=0.50,   # equal
-            win_pct_after=0.75,    # now winning
+            win_pct_before=0.50,
+            win_pct_after=0.75,
             candidates=candidates,
             provider=provider,
             elo=2000,
@@ -591,10 +567,13 @@ class TestGreatMoveDetection:
         board.push(chess.Move.from_uci("e2e4"))
         moves = list(board.legal_moves)
 
+        # white POV win_pct_before=0.75 means black is losing (0.25 from black's
+        # view), which falls inside great_min_win_pct_before..great_max_win_pct_before
+        # (0.15..0.82) from black's POV. With a 300cp gap this trips Trigger A.
         result = detect_great(
             ep_loss=0.0,
-            win_pct_before=0.75,  # white POV: black is losing
-            win_pct_after=0.45,   # white POV: black has equalized
+            win_pct_before=0.75,
+            win_pct_after=0.45,
             candidates=[
                 CandidateMove(move=moves[0], score_cp=-100, mate_in=None, pv=[moves[0]]),
                 CandidateMove(move=moves[1], score_cp=200, mate_in=None, pv=[moves[1]]),
@@ -604,7 +583,7 @@ class TestGreatMoveDetection:
             move=moves[0],
             elo=2000,
             is_engine_top=True,
-            candidate_gap_cp=100,
+            candidate_gap_cp=300,
         )
         assert result is True
 
