@@ -18,6 +18,12 @@ from typing import Optional
 import chess
 import chess.engine
 
+from chess_engine.discovery import (
+    DiscoveredEngine,
+    choose_default,
+    discover_engines,
+    get_engine_by_id,
+)
 from chess_engine.pool import EnginePool
 
 
@@ -89,6 +95,7 @@ class EngineService:
         pv_end_nodes: Optional[int] = None,
         played_move_uci: Optional[str] = None,
         played_move_nodes: Optional[int] = None,
+        engine_id: Optional[str] = None,
     ) -> EngineResult:
         """
         Analyze a position.
@@ -107,8 +114,18 @@ class EngineService:
             move. Populates EngineResult.played_move.
           - played_move_nodes: node budget for the played-move search
             (defaults to the main search's nodes, or None for depth-based).
+          - engine_id: id of a discovered engine to route this request to. If
+            None, the service's default engine is used.
         """
         raise NotImplementedError
+
+    def list_engines(self) -> list["DiscoveredEngine"]:
+        """Return the engines this service can route to. Empty if unknown."""
+        return []
+
+    def default_engine_id(self) -> Optional[str]:
+        """The id the service uses when no engine_id is passed to analyze()."""
+        return None
 
     async def shutdown(self) -> None:
         """Clean up resources. Called on application shutdown."""
@@ -117,20 +134,71 @@ class EngineService:
 
 class PooledEngineService(EngineService):
     """
-    Reuses Stockfish processes via an EnginePool.
+    Reuses Stockfish processes via per-binary EnginePools.
 
-    The pool keeps N Stockfish subprocesses alive across requests,
-    avoiding the ~200ms cold-start cost per analysis call.
+    Maintains a registry keyed by engine id so multiple Stockfish versions
+    can coexist and be selected per-request. Pools are started lazily the
+    first time an engine id is requested.
+
+    Backwards-compatible: if constructed with a single `pool` it behaves like
+    the original single-engine service and `engine_id` is ignored.
     """
 
-    def __init__(self, pool: EnginePool):
-        self._pool = pool
-        self._started = False
+    def __init__(
+        self,
+        pool: Optional[EnginePool] = None,
+        *,
+        engines: Optional[list[DiscoveredEngine]] = None,
+        default_engine_id: Optional[str] = None,
+        pool_size: int = 2,
+        threads_per_engine: int = 1,
+        hash_mb: int = 128,
+    ):
+        self._legacy_pool = pool
+        self._legacy_started = False
+        self._engines: dict[str, DiscoveredEngine] = {e.id: e for e in (engines or [])}
+        self._pools: dict[str, EnginePool] = {}
+        self._started_ids: set[str] = set()
+        self._default_engine_id = default_engine_id
+        self._pool_size = pool_size
+        self._threads_per_engine = threads_per_engine
+        self._hash_mb = hash_mb
+        self._lock = asyncio.Lock()
 
-    async def _ensure_started(self) -> None:
-        if not self._started:
-            await self._pool.start()
-            self._started = True
+    def list_engines(self) -> list[DiscoveredEngine]:
+        return list(self._engines.values())
+
+    def default_engine_id(self) -> Optional[str]:
+        return self._default_engine_id
+
+    async def _get_pool(self, engine_id: Optional[str]) -> EnginePool:
+        if self._legacy_pool is not None and not self._engines:
+            if not self._legacy_started:
+                await self._legacy_pool.start()
+                self._legacy_started = True
+            return self._legacy_pool
+
+        resolved = engine_id or self._default_engine_id
+        if resolved is None or resolved not in self._engines:
+            if not self._engines:
+                raise RuntimeError("No Stockfish engines discovered. See README for setup.")
+            resolved = self._default_engine_id or next(iter(self._engines))
+
+        async with self._lock:
+            pool = self._pools.get(resolved)
+            if pool is None:
+                engine = self._engines[resolved]
+                pool = EnginePool(
+                    engine_path=engine.path,
+                    size=self._pool_size,
+                    hash_mb=self._hash_mb,
+                    threads=self._threads_per_engine,
+                )
+                self._pools[resolved] = pool
+            if resolved not in self._started_ids:
+                await pool.start()
+                self._started_ids.add(resolved)
+        return pool
 
     async def analyze(
         self,
@@ -144,8 +212,9 @@ class PooledEngineService(EngineService):
         pv_end_nodes: Optional[int] = None,
         played_move_uci: Optional[str] = None,
         played_move_nodes: Optional[int] = None,
+        engine_id: Optional[str] = None,
     ) -> EngineResult:
-        await self._ensure_started()
+        pool = await self._get_pool(engine_id)
 
         board = chess.Board(fen)
 
@@ -168,7 +237,7 @@ class PooledEngineService(EngineService):
         pv_end_results: list[Optional[PVEndEval]] = []
         played_move_candidate: Optional[CandidateMove] = None
 
-        async with self._pool.acquire() as engine:
+        async with pool.acquire() as engine:
             # Apply per-request UCI options (e.g. UCI_LimitStrength, UCI_Elo)
             if uci_options:
                 await engine.configure(uci_options)
@@ -235,9 +304,12 @@ class PooledEngineService(EngineService):
         )
 
     async def shutdown(self) -> None:
-        if self._started:
-            await self._pool.stop()
-            self._started = False
+        if self._legacy_pool is not None and self._legacy_started:
+            await self._legacy_pool.stop()
+            self._legacy_started = False
+        for engine_id in list(self._started_ids):
+            await self._pools[engine_id].stop()
+        self._started_ids.clear()
 
 
 class RemoteEngineService(EngineService):
@@ -250,6 +322,18 @@ class RemoteEngineService(EngineService):
 
     def __init__(self, engine_url: str):
         self._engine_url = engine_url.rstrip("/")
+        self._remote_engine = DiscoveredEngine(
+            id="remote",
+            name="Remote engine",
+            version="remote",
+            path=engine_url,
+        )
+
+    def list_engines(self) -> list[DiscoveredEngine]:
+        return [self._remote_engine]
+
+    def default_engine_id(self) -> Optional[str]:
+        return self._remote_engine.id
 
     async def analyze(
         self,
@@ -263,6 +347,7 @@ class RemoteEngineService(EngineService):
         pv_end_nodes: Optional[int] = None,
         played_move_uci: Optional[str] = None,
         played_move_nodes: Optional[int] = None,
+        engine_id: Optional[str] = None,
     ) -> EngineResult:
         import httpx
 
@@ -282,6 +367,8 @@ class RemoteEngineService(EngineService):
             payload["played_move_uci"] = played_move_uci
         if played_move_nodes is not None:
             payload["played_move_nodes"] = played_move_nodes
+        if engine_id is not None:
+            payload["engine_id"] = engine_id
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{self._engine_url}/analyze", json=payload)
@@ -465,12 +552,23 @@ def get_engine_service() -> EngineService:
     else:
         import os
         cpu_count = os.cpu_count() or 2
-        # Use 2 engine processes with multiple threads each.
-        # This is faster than many single-threaded processes because
-        # Stockfish scales well with threads for a single search.
         pool_size = min(cpu_count, 2)
         threads_per_engine = max(1, cpu_count // pool_size)
-        pool = EnginePool(size=pool_size, threads=threads_per_engine)
-        _engine_service = PooledEngineService(pool)
+
+        engines = discover_engines()
+        if engines:
+            preference = getattr(settings, "STOCKFISH_DEFAULT_ENGINE", None)
+            default = choose_default(engines, preference)
+            _engine_service = PooledEngineService(
+                engines=engines,
+                default_engine_id=default.id if default else None,
+                pool_size=pool_size,
+                threads_per_engine=threads_per_engine,
+            )
+        else:
+            # Backwards-compatible fallback: no binaries discovered, fall back
+            # to the bare `stockfish` command on PATH via a single legacy pool.
+            pool = EnginePool(size=pool_size, threads=threads_per_engine)
+            _engine_service = PooledEngineService(pool)
 
     return _engine_service

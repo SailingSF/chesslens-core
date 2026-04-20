@@ -44,6 +44,10 @@
                     <option value="advanced">Advanced</option>
                 </select>
             </div>
+            <div class="analyze-form-field">
+                <label class="app-label" for="engine-select">Engine</label>
+                <select id="engine-select" class="app-select"></select>
+            </div>
             <button type="submit" id="analyze-btn" class="app-btn app-btn-primary">Analyze Position →</button>
         </form>
 
@@ -71,6 +75,7 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
+    ChessLens.populateEngineSelect('engine-select');
     let currentTurn = 'w';
 
     const boardConfig = {
@@ -214,7 +219,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const resp = await fetch('/api/position-explorer/', {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ fen, skill_level: level }),
+                body: JSON.stringify({
+                    fen,
+                    skill_level: level,
+                    engine_id: document.getElementById('engine-select').value || undefined,
+                }),
             });
             if (!resp.ok) {
                 const text = await resp.text();

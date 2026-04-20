@@ -60,11 +60,13 @@ class GameAnalyzer:
         engine: EngineService,
         assembler: Optional[ContextAssembler] = None,
         explainer: Optional[ExplanationGenerator] = None,
+        engine_defaults: Optional[dict] = None,
     ):
         self._engine = engine
         self._assembler = assembler or ContextAssembler()
         self._explainer = explainer or ExplanationGenerator()
         self._eco = self._assembler._eco
+        self._engine_defaults = engine_defaults or {}
 
     async def analyze_pgn(
         self,
@@ -122,18 +124,18 @@ class GameAnalyzer:
             move_opponent_elo = black_elo if color == "white" else white_elo
 
             # Engine analysis on the position BEFORE the move
-            engine_result = await self._engine.analyze(
-                played_on.fen(), depth=analysis_depth, multipv=multipv
-            )
+            main_kwargs = {"depth": analysis_depth, "multipv": multipv, **self._engine_defaults}
+            engine_result = await self._engine.analyze(played_on.fen(), **main_kwargs)
 
             # If the played move isn't in the multi-PV candidates, evaluate
             # the position AFTER the move and negate the score.
             if not any(c.move == move for c in engine_result.candidates):
                 post_board = played_on.copy()
                 post_board.push(move)
-                post_result = await self._engine.analyze(
-                    post_board.fen(), depth=followup_depth, multipv=1
-                )
+                followup_kwargs = {**self._engine_defaults, "depth": followup_depth, "multipv": 1}
+                # multipv=1 overrides the env default here since we only need
+                # the best reply to compute the post-move score.
+                post_result = await self._engine.analyze(post_board.fen(), **followup_kwargs)
                 if post_result.candidates:
                     post_best = post_result.best
                     played_cp = -post_best.score_cp if post_best.score_cp is not None else None

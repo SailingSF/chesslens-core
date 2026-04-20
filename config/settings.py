@@ -115,6 +115,28 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 # Engine service
 ENGINE_URL = os.environ.get("ENGINE_URL", None)  # None = local subprocess
 
+
+def _int_env(name: str, default: int | None) -> int | None:
+    val = os.environ.get(name)
+    if val is None or val == "":
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+
+# Stockfish defaults — applied by API views to every analyze() call unless
+# overridden per-request. Only the engine binary is user-selectable in the UI;
+# everything else is tuned via env vars.
+STOCKFISH_DEFAULT_NODES = _int_env("STOCKFISH_DEFAULT_NODES", 500_000)
+STOCKFISH_DEFAULT_MULTIPV = _int_env("STOCKFISH_DEFAULT_MULTIPV", 3)
+STOCKFISH_PV_LENGTH = _int_env("STOCKFISH_PV_LENGTH", None)
+STOCKFISH_PV_END_NODES = _int_env("STOCKFISH_PV_END_NODES", None)
+STOCKFISH_PLAYED_MOVE_NODES = _int_env("STOCKFISH_PLAYED_MOVE_NODES", None)
+STOCKFISH_DEFAULT_ENGINE = os.environ.get("STOCKFISH_DEFAULT_ENGINE", "") or None
+STOCKFISH_DIR = os.environ.get("STOCKFISH_DIR", "") or None
+
 # Anthropic
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 

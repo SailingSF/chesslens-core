@@ -27,6 +27,10 @@
                     <option value="advanced">Advanced</option>
                 </select>
             </div>
+            <div>
+                <label class="app-label" for="engine-select">Engine</label>
+                <select id="engine-select" class="app-select"></select>
+            </div>
             <button type="submit" id="analyze-btn" class="app-btn app-btn-primary">Analyze →</button>
         </div>
     </form>
@@ -70,6 +74,7 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
+    ChessLens.populateEngineSelect('engine-select');
     let board = null;
     let positions = [];
     let currentIndex = -1;
@@ -372,6 +377,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     pgn: pgn,
                     skill_level: document.getElementById('skill-select').value,
                     player_color: document.getElementById('color-select').value,
+                    engine_id: document.getElementById('engine-select').value || undefined,
                 }),
             });
 
