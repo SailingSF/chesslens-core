@@ -126,6 +126,21 @@ def discover_engines(extra_dirs: Optional[Iterable[Path]] = None) -> list[Discov
     if extra_dirs:
         dirs.extend(Path(d) for d in extra_dirs)
 
+    # Also scan each PATH entry for stockfish* binaries (catches versioned
+    # names like stockfish-16.1 that `shutil.which("stockfish")` misses).
+    seen_dirs: set[Path] = set()
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            resolved = Path(entry).resolve()
+        except OSError:
+            continue
+        if resolved in seen_dirs:
+            continue
+        seen_dirs.add(resolved)
+        dirs.append(resolved)
+
     found: list[DiscoveredEngine] = []
     for path in _candidate_paths(dirs):
         version = _probe_version(path)
