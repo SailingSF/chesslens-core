@@ -75,7 +75,9 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-    ChessLens.populateEngineSelect('engine-select');
+    if (window.ChessLens && ChessLens.populateEngineSelect) {
+        ChessLens.populateEngineSelect('engine-select');
+    }
     let currentTurn = 'w';
 
     const boardConfig = {

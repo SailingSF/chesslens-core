@@ -74,7 +74,9 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-    ChessLens.populateEngineSelect('engine-select');
+    if (window.ChessLens && ChessLens.populateEngineSelect) {
+        ChessLens.populateEngineSelect('engine-select');
+    }
     let board = null;
     let positions = [];
     let currentIndex = -1;
