@@ -22,6 +22,24 @@ from chess_engine.pool import EnginePool
 
 
 @dataclass
+class PVEndEval:
+    """Re-evaluation of a candidate's PV endpoint.
+
+    Produced when analyze() is called with pv_end_nodes set. The PV is pushed
+    on a board copy, then a fresh search is run from the endpoint. Exposes
+    quiet-leverage: moves whose root eval is small but whose PV resolves far
+    from it. Eval is white-POV (matching CandidateMove.score_cp).
+    """
+    score_cp: Optional[int]
+    mate_in: Optional[int]
+    depth: Optional[int]
+    seldepth: Optional[int]
+    pushed: int               # number of PV plies actually played
+    fen: str                  # FEN at the endpoint
+    terminal: Optional[str]   # "checkmate" | "stalemate" | "draw" | None
+
+
+@dataclass
 class CandidateMove:
     """A single engine candidate with its evaluation."""
     move: chess.Move
@@ -32,6 +50,9 @@ class CandidateMove:
     wdl_win: Optional[int] = None
     wdl_draw: Optional[int] = None
     wdl_loss: Optional[int] = None
+    seldepth: Optional[int] = None
+    # Populated only when analyze() is called with pv_end_nodes set.
+    pv_end: Optional[PVEndEval] = None
 
 
 @dataclass
@@ -40,6 +61,9 @@ class EngineResult:
     fen: str
     depth: int
     candidates: list[CandidateMove]   # multi-PV results, best move first
+    # Populated only when analyze() is called with played_move_uci set and the
+    # played move fell outside the multipv window (searchmoves exact eval).
+    played_move: Optional[CandidateMove] = None
 
     @property
     def best(self) -> CandidateMove:
@@ -61,12 +85,28 @@ class EngineService:
         nodes: Optional[int] = None,
         multipv: int = 3,
         uci_options: Optional[dict] = None,
+        pv_length: Optional[int] = None,
+        pv_end_nodes: Optional[int] = None,
+        played_move_uci: Optional[str] = None,
+        played_move_nodes: Optional[int] = None,
     ) -> EngineResult:
         """
         Analyze a position.
 
         If nodes is set, uses node-based search (chess.com style) instead of
         depth-based search. When nodes is set, depth is ignored.
+
+        Optional enrichments (all opt-in, produce the same output shape as
+        classification_model/engine/run_stockfish.py when set):
+          - pv_length: truncate each candidate's PV to this many plies.
+          - pv_end_nodes: if set, push each candidate's PV on a board copy and
+            re-search the endpoint with this node budget. Populates
+            CandidateMove.pv_end.
+          - played_move_uci: if set and the move is not in the multipv window,
+            run a `searchmoves`-restricted search for an exact eval of that
+            move. Populates EngineResult.played_move.
+          - played_move_nodes: node budget for the played-move search
+            (defaults to the main search's nodes, or None for depth-based).
         """
         raise NotImplementedError
 
@@ -100,6 +140,10 @@ class PooledEngineService(EngineService):
         nodes: Optional[int] = None,
         multipv: int = 3,
         uci_options: Optional[dict] = None,
+        pv_length: Optional[int] = None,
+        pv_end_nodes: Optional[int] = None,
+        played_move_uci: Optional[str] = None,
+        played_move_nodes: Optional[int] = None,
     ) -> EngineResult:
         await self._ensure_started()
 
@@ -111,31 +155,84 @@ class PooledEngineService(EngineService):
         else:
             limit = chess.engine.Limit(depth=depth)
 
+        # Resolve the played move up front so we can branch on top-N membership.
+        played_move: Optional[chess.Move] = None
+        if played_move_uci:
+            try:
+                mv = chess.Move.from_uci(played_move_uci)
+                if mv in board.legal_moves:
+                    played_move = mv
+            except ValueError:
+                played_move = None
+
+        pv_end_results: list[Optional[PVEndEval]] = []
+        played_move_candidate: Optional[CandidateMove] = None
+
         async with self._pool.acquire() as engine:
             # Apply per-request UCI options (e.g. UCI_LimitStrength, UCI_Elo)
             if uci_options:
                 await engine.configure(uci_options)
 
-            info_list = await engine.analyse(
-                board,
-                limit,
-                multipv=multipv,
-            )
+            info_list = await engine.analyse(board, limit, multipv=multipv)
+
+            # python-chess engine.analyse with multipv returns a list of InfoDicts
+            if not isinstance(info_list, list):
+                info_list = [info_list]
+
+            candidates = _parse_candidates(info_list)
+            if pv_length is not None:
+                for c in candidates:
+                    c.pv = c.pv[:pv_length]
+
+            # PV-end re-eval: push each candidate's PV on a board copy and
+            # re-search the endpoint with a shallower node budget. Keeps the
+            # same engine checked out so transposition tables stay warm.
+            if pv_end_nodes is not None:
+                pv_end_limit = chess.engine.Limit(nodes=pv_end_nodes)
+                for c in candidates:
+                    pv_end_results.append(
+                        await _compute_pv_end(engine, board, c.pv, pv_end_limit)
+                    )
+
+            # Played-move exact eval via searchmoves when it's outside top_moves.
+            if played_move is not None:
+                in_top = any(c.move == played_move for c in candidates)
+                if not in_top:
+                    pm_nodes = played_move_nodes if played_move_nodes is not None else nodes
+                    pm_limit = (
+                        chess.engine.Limit(nodes=pm_nodes)
+                        if pm_nodes is not None
+                        else chess.engine.Limit(depth=depth)
+                    )
+                    pm_info = await engine.analyse(
+                        board, pm_limit, multipv=1, root_moves=[played_move]
+                    )
+                    if not isinstance(pm_info, list):
+                        pm_info = [pm_info]
+                    pm_candidates = _parse_candidates(pm_info)
+                    if pm_candidates:
+                        played_move_candidate = pm_candidates[0]
+                        if pv_length is not None:
+                            played_move_candidate.pv = played_move_candidate.pv[:pv_length]
 
             # Reset Elo constraints after request so next caller gets clean state
             if uci_options and "UCI_LimitStrength" in uci_options:
                 await engine.configure({"UCI_LimitStrength": False})
 
-        # python-chess engine.analyse with multipv returns a list of InfoDicts
-        if not isinstance(info_list, list):
-            info_list = [info_list]
+        # Attach pv_end results after releasing the engine.
+        if pv_end_nodes is not None:
+            for c, pv_end in zip(candidates, pv_end_results):
+                c.pv_end = pv_end
 
-        candidates = _parse_candidates(info_list)
-        # Report the depth actually reached (from engine info if available)
         reached_depth = depth
         if info_list and "depth" in info_list[0]:
             reached_depth = info_list[0]["depth"]
-        return EngineResult(fen=fen, depth=reached_depth, candidates=candidates)
+        return EngineResult(
+            fen=fen,
+            depth=reached_depth,
+            candidates=candidates,
+            played_move=played_move_candidate,
+        )
 
     async def shutdown(self) -> None:
         if self._started:
@@ -162,6 +259,10 @@ class RemoteEngineService(EngineService):
         nodes: Optional[int] = None,
         multipv: int = 3,
         uci_options: Optional[dict] = None,
+        pv_length: Optional[int] = None,
+        pv_end_nodes: Optional[int] = None,
+        played_move_uci: Optional[str] = None,
+        played_move_nodes: Optional[int] = None,
     ) -> EngineResult:
         import httpx
 
@@ -173,28 +274,58 @@ class RemoteEngineService(EngineService):
         }
         if nodes is not None:
             payload["nodes"] = nodes
+        if pv_length is not None:
+            payload["pv_length"] = pv_length
+        if pv_end_nodes is not None:
+            payload["pv_end_nodes"] = pv_end_nodes
+        if played_move_uci is not None:
+            payload["played_move_uci"] = played_move_uci
+        if played_move_nodes is not None:
+            payload["played_move_nodes"] = played_move_nodes
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{self._engine_url}/analyze", json=payload)
             resp.raise_for_status()
             data = resp.json()
 
-        board = chess.Board(fen)
-        candidates = []
-        for c in data.get("candidates", []):
-            move = chess.Move.from_uci(c["move"])
-            pv = [chess.Move.from_uci(m) for m in c.get("pv", [])]
-            candidates.append(CandidateMove(
-                move=move,
-                score_cp=c.get("score_cp"),
-                mate_in=c.get("mate_in"),
-                pv=pv,
-                wdl_win=c.get("wdl_win"),
-                wdl_draw=c.get("wdl_draw"),
-                wdl_loss=c.get("wdl_loss"),
-            ))
+        candidates = [_candidate_from_dict(c) for c in data.get("candidates", [])]
+        played_move_dict = data.get("played_move")
+        played_move = _candidate_from_dict(played_move_dict) if played_move_dict else None
 
-        return EngineResult(fen=fen, depth=depth, candidates=candidates)
+        return EngineResult(
+            fen=fen,
+            depth=data.get("depth", depth),
+            candidates=candidates,
+            played_move=played_move,
+        )
+
+
+def _candidate_from_dict(c: dict) -> CandidateMove:
+    move = chess.Move.from_uci(c["move"])
+    pv = [chess.Move.from_uci(m) for m in c.get("pv", [])]
+    pv_end = None
+    pv_end_data = c.get("pv_end")
+    if pv_end_data:
+        pv_end = PVEndEval(
+            score_cp=pv_end_data.get("score_cp"),
+            mate_in=pv_end_data.get("mate_in"),
+            depth=pv_end_data.get("depth"),
+            seldepth=pv_end_data.get("seldepth"),
+            pushed=pv_end_data.get("pushed", 0),
+            fen=pv_end_data.get("fen", ""),
+            terminal=pv_end_data.get("terminal"),
+        )
+    return CandidateMove(
+        move=move,
+        score_cp=c.get("score_cp"),
+        mate_in=c.get("mate_in"),
+        pv=pv,
+        wdl_win=c.get("wdl_win"),
+        wdl_draw=c.get("wdl_draw"),
+        wdl_loss=c.get("wdl_loss"),
+        seldepth=c.get("seldepth"),
+        pv_end=pv_end,
+    )
 
 
 def _parse_candidates(info_list: list) -> list[CandidateMove]:
@@ -227,11 +358,85 @@ def _parse_candidates(info_list: list) -> list[CandidateMove]:
             wdl_draw = pov_wdl.draws
             wdl_loss = pov_wdl.losses
 
+        seldepth = info.get("seldepth")
+
         candidates.append(CandidateMove(
             move=move, score_cp=score_cp, mate_in=mate_in, pv=pv,
             wdl_win=wdl_win, wdl_draw=wdl_draw, wdl_loss=wdl_loss,
+            seldepth=seldepth,
         ))
     return candidates
+
+
+async def _compute_pv_end(
+    engine: "chess.engine.UciProtocol",
+    root_board: chess.Board,
+    pv: list[chess.Move],
+    limit: "chess.engine.Limit",
+) -> Optional[PVEndEval]:
+    """Push `pv` on a copy of `root_board` and re-search the endpoint.
+
+    Mirrors run_stockfish.py's evaluate_pv_end. Returns None if the PV is
+    empty. If the PV ends the game, synthesizes a terminal eval instead of
+    calling the engine.
+    """
+    if not pv:
+        return None
+    board = root_board.copy(stack=False)
+    pushed = 0
+    for mv in pv:
+        if mv not in board.legal_moves:
+            break
+        board.push(mv)
+        pushed += 1
+    if pushed == 0:
+        return None
+
+    end_fen = board.fen()
+
+    if board.is_checkmate():
+        return PVEndEval(
+            score_cp=None, mate_in=0, depth=None, seldepth=None,
+            pushed=pushed, fen=end_fen, terminal="checkmate",
+        )
+    if board.is_stalemate():
+        return PVEndEval(
+            score_cp=0, mate_in=None, depth=None, seldepth=None,
+            pushed=pushed, fen=end_fen, terminal="stalemate",
+        )
+    if (
+        board.is_insufficient_material()
+        or board.is_fivefold_repetition()
+        or board.is_seventyfive_moves()
+    ):
+        return PVEndEval(
+            score_cp=0, mate_in=None, depth=None, seldepth=None,
+            pushed=pushed, fen=end_fen, terminal="draw",
+        )
+
+    info = await engine.analyse(board, limit, multipv=1)
+    if isinstance(info, list):
+        info = info[0] if info else None
+    if info is None:
+        return None
+    score = info.get("score")
+    score_cp = None
+    mate_in = None
+    if score is not None:
+        pov = score.white()
+        if pov.is_mate():
+            mate_in = pov.mate()
+        else:
+            score_cp = pov.score()
+    return PVEndEval(
+        score_cp=score_cp,
+        mate_in=mate_in,
+        depth=info.get("depth"),
+        seldepth=info.get("seldepth"),
+        pushed=pushed,
+        fen=end_fen,
+        terminal=None,
+    )
 
 
 # ---------------------------------------------------------------------------

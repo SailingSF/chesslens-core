@@ -51,6 +51,7 @@ class EnginePool:
             await engine.configure({
                 "Hash": self._hash_mb,
                 "Threads": self._threads,
+                "UCI_ShowWDL": True,
             })
             self._engines.append(engine)
             await self._queue.put(engine)
