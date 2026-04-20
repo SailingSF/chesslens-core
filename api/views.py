@@ -32,6 +32,20 @@ from explanation.generator import get_explainer
 from game.analyzer import GameAnalyzer
 from game.session import GameSession, SessionManager
 
+
+def _engine_defaults():
+    """Read per-request engine kwargs from Django settings. None values are
+    stripped so callers can overlay them with their own overrides."""
+    from django.conf import settings
+    raw = {
+        "nodes": getattr(settings, "STOCKFISH_DEFAULT_NODES", None),
+        "multipv": getattr(settings, "STOCKFISH_DEFAULT_MULTIPV", None),
+        "pv_length": getattr(settings, "STOCKFISH_PV_LENGTH", None),
+        "pv_end_nodes": getattr(settings, "STOCKFISH_PV_END_NODES", None),
+        "played_move_nodes": getattr(settings, "STOCKFISH_PLAYED_MOVE_NODES", None),
+    }
+    return {k: v for k, v in raw.items() if v is not None}
+
 # Shared assembler instance (stateless, safe to reuse)
 _assembler = ContextAssembler()
 
@@ -55,6 +69,23 @@ def _error_response(message, status=400):
     return JsonResponse({"error": message}, status=status)
 
 
+async def engines_list(request):
+    """
+    List Stockfish engines this server can route to, plus the default id.
+
+    Response: {"engines": [{"id", "name", "version"}, ...], "default_id": "..."}
+    """
+    engine = get_engine_service()
+    engines = [
+        {"id": e.id, "name": e.name, "version": e.version}
+        for e in engine.list_engines()
+    ]
+    return JsonResponse({
+        "engines": engines,
+        "default_id": engine.default_engine_id(),
+    })
+
+
 @csrf_exempt
 @require_POST
 async def game_review(request):
@@ -76,11 +107,15 @@ async def game_review(request):
     pgn_text = data["pgn"]
     skill_level = data.get("skill_level", "intermediate")
     player_color = data.get("player_color", "white")
+    engine_id = data.get("engine_id") or None
 
     api_key = getattr(request, "anthropic_api_key", None)
     engine = get_engine_service()
     explainer = get_explainer()
-    analyzer = GameAnalyzer(engine, assembler=_assembler, explainer=explainer)
+    analyzer = GameAnalyzer(
+        engine, assembler=_assembler, explainer=explainer,
+        engine_defaults={**_engine_defaults(), **({"engine_id": engine_id} if engine_id else {})},
+    )
 
     async def event_stream():
         async for move_analysis in analyzer.analyze_pgn(
@@ -130,9 +165,13 @@ async def position_explorer(request):
 
     fen = data["fen"]
     skill_level = data.get("skill_level", "intermediate")
+    engine_id = data.get("engine_id") or None
 
     engine = get_engine_service()
-    result = await engine.analyze(fen, depth=20, multipv=3)
+    analyze_kwargs = {"depth": 20, **_engine_defaults()}
+    if engine_id:
+        analyze_kwargs["engine_id"] = engine_id
+    result = await engine.analyze(fen, **analyze_kwargs)
 
     board = chess.Board(fen)
     context = _assembler.assemble(board, result)

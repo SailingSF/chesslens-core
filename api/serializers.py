@@ -7,12 +7,14 @@ class GameReviewSerializer(serializers.Serializer):
     pgn = serializers.CharField()
     skill_level = serializers.ChoiceField(choices=SKILL_LEVELS, default="intermediate")
     player_color = serializers.ChoiceField(choices=["white", "black"], default="white")
+    engine_id = serializers.CharField(required=False, allow_blank=True)
 
 
 class PositionExplorerSerializer(serializers.Serializer):
     fen = serializers.CharField()
     skill_level = serializers.ChoiceField(choices=SKILL_LEVELS, default="intermediate")
     question = serializers.CharField(required=False, allow_blank=True)
+    engine_id = serializers.CharField(required=False, allow_blank=True)
 
 
 class BotMatchStartSerializer(serializers.Serializer):
