@@ -1,61 +1,73 @@
+{% load static %}
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}ChessLens{% endblock %}</title>
 
-    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+    <link rel="stylesheet"
+          href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=IBM+Plex+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
 
-    <!-- Pico CSS — classless styling -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
-
-    <!-- chessboard.js styles -->
     <link rel="stylesheet"
           href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
 
-    {% load static %}
-    <link rel="stylesheet" href="{% static 'ui/app.css' %}?v=2">
+    <link rel="stylesheet" href="{% static 'ui/app.css' %}?v=3">
 </head>
 <body>
-    <header class="container">
-        <nav>
-            <ul>
-                <li><a href="{% url 'ui:index' %}"><strong>ChessLens</strong></a></li>
-            </ul>
-            <ul>
-                <li><a href="{% url 'ui:game-review' %}">Game Review</a></li>
-                <li><a href="{% url 'ui:position-explorer' %}">Position Explorer</a></li>
-                <li><a href="https://chesslens.ai" target="_blank" rel="noopener">chesslens.ai &rarr;</a></li>
-            </ul>
+    <div class="app-bg">
+        <div class="app-bg-grid"></div>
+        <div class="app-bg-glow"></div>
+    </div>
+
+    <div class="app-root">
+        <nav class="app-nav">
+            <a class="app-brand" href="{% url 'ui:index' %}">
+                <span class="app-brand-glyph">
+                    <svg viewBox="0 0 32 32" width="26" height="26">
+                        <rect x="2" y="2" width="12" height="12" fill="currentColor" opacity="0.9"/>
+                        <rect x="18" y="2" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.2"/>
+                        <rect x="2" y="18" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.2"/>
+                        <rect x="18" y="18" width="12" height="12" fill="currentColor" opacity="0.9"/>
+                        <circle cx="16" cy="16" r="2.5" fill="#D4A14A"/>
+                    </svg>
+                </span>
+                <span class="app-brand-word">ChessLens</span>
+            </a>
+            <div class="app-nav-links">
+                <a class="app-nav-link {% if active_page == 'review' %}active{% endif %}"
+                   href="{% url 'ui:game-review' %}">Game Review</a>
+                <a class="app-nav-link {% if active_page == 'explorer' %}active{% endif %}"
+                   href="{% url 'ui:position-explorer' %}">Position Explorer</a>
+                <a class="app-nav-link app-nav-ext" href="https://chesslens.ai" target="_blank" rel="noopener">chesslens.ai ↗</a>
+                <a class="app-nav-gh" href="https://github.com/SailingSF/chesslens-core" target="_blank" rel="noopener">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true">
+                        <path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844a9.59 9.59 0 012.504.337c1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
+                    </svg>
+                    GitHub
+                </a>
+            </div>
         </nav>
-    </header>
 
-    <main class="container">
-        {% block content %}{% endblock %}
-    </main>
+        <main class="app-content">
+            {% block content %}{% endblock %}
+        </main>
 
-    <footer class="container">
-        <small>
-            <a href="https://github.com/chesslens/chesslens-core" target="_blank" rel="noopener">GitHub</a> &middot;
-            Open-source chess analysis powered by Stockfish + Claude
-        </small>
-    </footer>
+        <footer class="app-footer">
+            <a href="https://github.com/SailingSF/chesslens-core" target="_blank" rel="noopener">chesslens-core</a>
+            &middot; Open-source &middot; Stockfish + Claude AI &middot;
+            <a href="https://chesslens.ai" target="_blank" rel="noopener">chesslens.ai ↗</a>
+        </footer>
+    </div>
 
-    <!-- jQuery (required by chessboard.js) -->
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-    <!-- chess.js for move validation -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
-    <!-- chessboard.js for board rendering -->
     <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
-    <!-- marked.js for rendering markdown from LLM responses -->
     <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 
-    {% load static %}
-    <script src="{% static 'ui/app.js' %}?v=2"></script>
+    <script src="{% static 'ui/app.js' %}?v=3"></script>
     {% block extra_js %}{% endblock %}
 </body>
 </html>

@@ -2,64 +2,70 @@
 {% block title %}Position Explorer — ChessLens{% endblock %}
 
 {% block content %}
-<h2>Position Explorer</h2>
-<p>Set up a position by dragging pieces on the board, then analyze to see the top engine moves with AI explanations.</p>
+<span class="app-eyebrow">§ Position Explorer</span>
+<h1 class="app-page-title">Explore any position.<br><em>Understand what's happening.</em></h1>
+<p class="app-page-sub">Drag pieces or paste a FEN. Top engine moves with AI explanation calibrated to your level.</p>
 
 <div class="explorer-layout">
-    <!-- Left column: board + controls -->
     <div>
-        <div id="board-wrapper">
-            <div id="board" style="width: 100%;"></div>
+        <div class="app-board-wrap" style="margin-bottom:10px;">
+            <div id="board"></div>
         </div>
-
-        <div id="board-controls">
-            <button type="button" id="start-btn" class="secondary outline" title="Starting position">Start</button>
-            <button type="button" id="clear-btn" class="secondary outline" title="Clear board">Clear</button>
-            <button type="button" id="flip-btn" class="secondary outline" title="Flip board">Flip</button>
+        <div class="board-controls" style="justify-content:space-between;">
+            <div style="display:flex; gap:4px;">
+                <button type="button" class="app-btn app-btn-ghost app-btn-sm" id="start-btn" title="Starting position">Start</button>
+                <button type="button" class="app-btn app-btn-ghost app-btn-sm" id="clear-btn" title="Clear board">Clear</button>
+                <button type="button" class="app-btn app-btn-ghost app-btn-sm" id="flip-btn" title="Flip board">↕</button>
+            </div>
+            <div class="turn-row">
+                <span class="turn-row-label">To move:</span>
+                <div class="turn-group">
+                    <button type="button" class="turn-btn active" id="turn-white">White</button>
+                    <button type="button" class="turn-btn" id="turn-black">Black</button>
+                </div>
+            </div>
         </div>
-
-        <div id="turn-select-row">
-            <label>Side to move:</label>
-            <fieldset role="group">
-                <button type="button" id="turn-white" class="turn-btn active">White</button>
-                <button type="button" id="turn-black" class="turn-btn">Black</button>
-            </fieldset>
+        <div class="fen-row">
+            <input type="text" id="fen-input" class="app-input"
+                   style="font-size:11px;"
+                   value="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+                   placeholder="Paste FEN…">
+            <button type="button" class="app-btn app-btn-ghost app-btn-sm" id="set-fen-btn">Load</button>
         </div>
-
-        <label for="fen-input">FEN</label>
-        <input type="text" id="fen-input"
-               value="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-               placeholder="Paste FEN or set up pieces above">
-        <button type="button" id="set-fen-btn" class="secondary" style="width:100%; margin-bottom:1rem;">Load FEN</button>
     </div>
 
-    <!-- Right column: analysis controls + results -->
     <div>
-        <form id="position-form">
-            <label for="skill-select">Explanation Level</label>
-            <select id="skill-select">
-                <option value="beginner">Beginner</option>
-                <option value="intermediate" selected>Intermediate</option>
-                <option value="advanced">Advanced</option>
-            </select>
-            <button type="submit" id="analyze-btn" style="width:100%;">Analyze Position</button>
+        <form id="position-form" class="analyze-form">
+            <div class="analyze-form-field">
+                <label class="app-label" for="skill-select">Explanation level</label>
+                <select id="skill-select" class="app-select">
+                    <option value="beginner">Beginner</option>
+                    <option value="intermediate" selected>Intermediate</option>
+                    <option value="advanced">Advanced</option>
+                </select>
+            </div>
+            <button type="submit" id="analyze-btn" class="app-btn app-btn-primary">Analyze Position →</button>
         </form>
 
-        <article id="result-card" hidden>
-            <header>
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <strong>Engine Analysis</strong>
-                    <small id="res-opening" style="opacity:0.7;"></small>
-                </div>
-            </header>
-
-            <div id="candidates-list"></div>
-
-            <div id="res-explanation-section" style="margin-top:1rem;">
-                <strong>AI Explanation</strong>
-                <div id="res-explanation" class="explanation-text" style="margin-top:0.5rem;"></div>
+        <div id="result-card" hidden>
+            <div class="analysis-header">
+                <span class="analysis-header-label">Engine Analysis</span>
+                <span class="analysis-header-meta" id="res-opening"></span>
             </div>
-        </article>
+            <div class="candidates-list" id="candidates-list"></div>
+
+            <div class="analysis-header">
+                <span class="analysis-header-label">AI Explanation</span>
+                <span class="analysis-header-meta" id="res-level"></span>
+            </div>
+            <div class="expl-panel">
+                <div id="res-explanation" class="expl-body"></div>
+            </div>
+        </div>
+
+        <div id="empty-state" class="explorer-empty">
+            Set up a position and click Analyze Position
+        </div>
     </div>
 </div>
 
@@ -67,7 +73,6 @@
 document.addEventListener('DOMContentLoaded', () => {
     let currentTurn = 'w';
 
-    // --- Board setup ---
     const boardConfig = {
         position: 'start',
         draggable: true,
@@ -80,21 +85,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function buildFenFromBoard() {
         const pos = board.position();
-        // Build piece placement from position object
-        let rows = [];
+        const rows = [];
         for (let r = 8; r >= 1; r--) {
-            let row = '';
-            let empty = 0;
+            let row = '', empty = 0;
             for (let c = 0; c < 8; c++) {
                 const file = 'abcdefgh'[c];
                 const sq = file + r;
                 const piece = pos[sq];
                 if (piece) {
                     if (empty > 0) { row += empty; empty = 0; }
-                    // chessboard.js uses wK, bQ etc
-                    const color = piece[0]; // w or b
-                    const type = piece[1];  // K, Q, R, B, N, P
-                    row += color === 'w' ? type : type.toLowerCase();
+                    row += piece[0] === 'w' ? piece[1] : piece[1].toLowerCase();
                 } else {
                     empty++;
                 }
@@ -106,18 +106,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function onBoardChange() {
-        // Small delay to let chessboard.js finish updating
         setTimeout(() => {
             document.getElementById('fen-input').value = buildFenFromBoard();
         }, 0);
     }
 
-    // Load FEN button
     document.getElementById('set-fen-btn').addEventListener('click', () => {
         const fen = document.getElementById('fen-input').value.trim();
         if (!fen) return;
         board.position(fen);
-        // Extract turn from FEN
         const parts = fen.split(' ');
         if (parts.length >= 2) {
             currentTurn = parts[1] === 'b' ? 'b' : 'w';
@@ -125,13 +122,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Board control buttons
     document.getElementById('start-btn').addEventListener('click', () => {
         board.start();
         currentTurn = 'w';
         updateTurnButtons();
-        document.getElementById('fen-input').value =
-            'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+        document.getElementById('fen-input').value = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
     });
 
     document.getElementById('clear-btn').addEventListener('click', () => {
@@ -141,11 +136,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('fen-input').value = '8/8/8/8/8/8/8/8 w - - 0 1';
     });
 
-    document.getElementById('flip-btn').addEventListener('click', () => {
-        board.flip();
-    });
+    document.getElementById('flip-btn').addEventListener('click', () => board.flip());
 
-    // Turn selector
     function updateTurnButtons() {
         document.getElementById('turn-white').classList.toggle('active', currentTurn === 'w');
         document.getElementById('turn-black').classList.toggle('active', currentTurn === 'b');
@@ -156,31 +148,26 @@ document.addEventListener('DOMContentLoaded', () => {
         updateTurnButtons();
         document.getElementById('fen-input').value = buildFenFromBoard();
     });
-
     document.getElementById('turn-black').addEventListener('click', () => {
         currentTurn = 'b';
         updateTurnButtons();
         document.getElementById('fen-input').value = buildFenFromBoard();
     });
 
-    // --- Analysis ---
     const form = document.getElementById('position-form');
     const btn = document.getElementById('analyze-btn');
     const card = document.getElementById('result-card');
+    const emptyState = document.getElementById('empty-state');
 
     function formatEval(cp, mateIn) {
-        if (mateIn !== null && mateIn !== undefined) {
-            return mateIn > 0 ? `M${mateIn}` : `M${Math.abs(mateIn)}`;
-        }
+        if (mateIn !== null && mateIn !== undefined) return 'M' + Math.abs(mateIn);
         if (cp === null || cp === undefined) return '?';
         const sign = cp >= 0 ? '+' : '';
         return sign + (cp / 100).toFixed(2);
     }
 
     function evalClass(cp, mateIn) {
-        if (mateIn !== null && mateIn !== undefined) {
-            return mateIn > 0 ? 'eval-winning' : 'eval-losing';
-        }
+        if (mateIn !== null && mateIn !== undefined) return mateIn > 0 ? 'eval-winning' : 'eval-losing';
         if (cp === null || cp === undefined) return '';
         if (cp > 100) return 'eval-winning';
         if (cp < -100) return 'eval-losing';
@@ -190,20 +177,18 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderCandidates(candidates) {
         const container = document.getElementById('candidates-list');
         container.innerHTML = '';
-
         candidates.forEach((cand, i) => {
             const rank = i + 1;
             const evalStr = formatEval(cand.cp, cand.mate_in);
             const cls = evalClass(cand.cp, cand.mate_in);
-            const pvStr = cand.pv.join(' ');
-
+            const pvStr = (cand.pv || []).join(' ');
             const div = document.createElement('div');
-            div.className = 'candidate-row';
+            div.className = 'candidate-row' + (rank === 1 ? ' top' : '');
             div.innerHTML =
-                '<div class="candidate-rank">' + rank + '</div>' +
-                '<div class="candidate-move">' + cand.move + '</div>' +
-                '<div class="candidate-eval ' + cls + '">' + evalStr + '</div>' +
-                '<div class="candidate-pv">' + pvStr + '</div>';
+                '<span class="candidate-rank">' + rank + '</span>' +
+                '<span class="candidate-move">' + cand.move + '</span>' +
+                '<span class="candidate-eval ' + cls + '">' + evalStr + '</span>' +
+                '<span class="candidate-pv">' + pvStr + '</span>';
             container.appendChild(div);
         });
     }
@@ -215,58 +200,50 @@ document.addEventListener('DOMContentLoaded', () => {
 
         btn.disabled = true;
         btn.setAttribute('aria-busy', 'true');
-        btn.textContent = 'Analyzing...';
+        btn.textContent = 'Analyzing…';
         card.hidden = true;
+        emptyState.hidden = true;
 
-        const headers = {'Content-Type': 'application/json'};
+        const headers = { 'Content-Type': 'application/json' };
         const apiKey = localStorage.getItem('chesslens_api_key');
         if (apiKey) headers['X-Anthropic-Key'] = apiKey;
+
+        const level = document.getElementById('skill-select').value;
 
         try {
             const resp = await fetch('/api/position-explorer/', {
                 method: 'POST',
-                headers: headers,
-                body: JSON.stringify({
-                    fen: fen,
-                    skill_level: document.getElementById('skill-select').value,
-                }),
+                headers,
+                body: JSON.stringify({ fen, skill_level: level }),
             });
-
             if (!resp.ok) {
                 const text = await resp.text();
                 throw new Error(resp.status + ': ' + text);
             }
-
             const data = await resp.json();
-
-            // Opening info
             const openingEl = document.getElementById('res-opening');
-            openingEl.textContent = data.opening
-                ? data.eco + ' — ' + data.opening
-                : '';
+            openingEl.textContent = data.opening ? (data.eco + ' · ' + data.opening) : '';
+            document.getElementById('res-level').textContent = level.charAt(0).toUpperCase() + level.slice(1);
 
-            // Render candidate moves
             renderCandidates(data.candidates || []);
 
-            // Explanation (render as markdown)
             const explEl = document.getElementById('res-explanation');
             if (typeof marked !== 'undefined' && marked.parse) {
                 explEl.innerHTML = marked.parse(data.explanation || '');
             } else {
                 explEl.textContent = data.explanation || '';
             }
-
             card.hidden = false;
         } catch (err) {
             document.getElementById('candidates-list').innerHTML = '';
-            const explEl = document.getElementById('res-explanation');
-            explEl.textContent = 'Error: ' + err.message;
+            document.getElementById('res-explanation').textContent = 'Error: ' + err.message;
             document.getElementById('res-opening').textContent = '';
+            document.getElementById('res-level').textContent = '';
             card.hidden = false;
         } finally {
             btn.disabled = false;
             btn.removeAttribute('aria-busy');
-            btn.textContent = 'Analyze Position';
+            btn.textContent = 'Analyze Position →';
         }
     });
 });

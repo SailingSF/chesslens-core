@@ -2,74 +2,86 @@
 {% block title %}ChessLens — Local Analysis{% endblock %}
 
 {% block content %}
-<div class="hero">
-    <span class="chess-icon">&#9822;</span>
-    <h1>ChessLens</h1>
-    <p>Open-source chess analysis powered by Stockfish&nbsp;+&nbsp;Claude&nbsp;AI</p>
-</div>
+<span class="app-eyebrow">chesslens-core · local instance</span>
+<h1 class="app-page-title">Open-source chess analysis.<br><em>Running locally.</em></h1>
+<p class="app-page-sub">Stockfish evaluation + move classification + Claude AI narration — on your machine. No cloud required.</p>
 
-<section id="api-key-section">
-    <article>
-        <h3>API Key Setup</h3>
-        <p>
-            ChessLens uses Claude to explain positions in plain language.
-            Your key is stored only in your browser and sent directly to the local server.
-        </p>
-        <fieldset role="group">
-            <input type="password" id="api-key-input"
-                   placeholder="sk-ant-api03-..."
-                   aria-label="Anthropic API Key">
-            <button id="save-key-btn">Save Key</button>
-        </fieldset>
-        <small id="key-status"></small>
-    </article>
+<section class="app-card api-key-card">
+    <h2>Anthropic API Key</h2>
+    <p>Used for AI move narration. Stored only in your browser, sent directly to the local server.</p>
+    <div class="api-key-row">
+        <input type="password" class="app-input" id="api-key-input"
+               placeholder="sk-ant-api03-..."
+               aria-label="Anthropic API Key">
+        <button type="button" class="app-btn app-btn-ghost" id="save-key-btn">Save</button>
+    </div>
+    <div id="key-saved" class="key-saved" hidden>
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 6L9 17l-5-5"/>
+        </svg>
+        <span id="key-saved-text">API key saved</span>
+    </div>
 </section>
 
-<div class="feature-cards">
-    <article>
-        <h3>Game Review</h3>
-        <p>Paste a PGN and get move-by-move analysis with plain-language explanations of mistakes and key moments.</p>
-        <a href="{% url 'ui:game-review' %}" role="button">Analyze a Game</a>
-    </article>
-    <article>
-        <h3>Position Explorer</h3>
-        <p>Enter a FEN or set up a position on the board. Get engine evaluation and an AI explanation.</p>
-        <a href="{% url 'ui:position-explorer' %}" role="button" class="secondary">Explore a Position</a>
-    </article>
+<div class="feature-grid">
+    <a class="feature-card" href="{% url 'ui:game-review' %}">
+        <div class="feature-card-icon">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.4">
+                <path d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18"/>
+            </svg>
+        </div>
+        <h3 class="feature-card-title">Game Review</h3>
+        <p class="feature-card-body">Paste a PGN and get move-by-move Stockfish + classifier analysis — Best · Great · Inaccuracy · Mistake · Blunder — with plain-language AI explanations.</p>
+        <span class="feature-card-link">Analyze a game →</span>
+    </a>
+    <a class="feature-card" href="{% url 'ui:position-explorer' %}">
+        <div class="feature-card-icon">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.4">
+                <rect x="3" y="3" width="18" height="18"/>
+                <path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>
+            </svg>
+        </div>
+        <h3 class="feature-card-title">Position Explorer</h3>
+        <p class="feature-card-body">Drag pieces or paste a FEN. Get multi-line Stockfish evaluation at depth and an AI explanation of what's happening in the position.</p>
+        <span class="feature-card-link">Explore a position →</span>
+    </a>
 </div>
 
-<article class="promo-card">
-    <h3>Looking for the full experience?</h3>
-    <p>
-        <a href="https://chesslens.ai" target="_blank" rel="noopener">chesslens.ai</a>
-        offers bot matches with live coaching, opening lab, and more — no setup required.
+<div class="promo-card">
+    <p>Bot matches with live coaching and the opening lab →
+        <a href="https://chesslens.ai" target="_blank" rel="noopener">chesslens.ai ↗</a>
     </p>
-</article>
+</div>
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
     const input = document.getElementById('api-key-input');
     const btn = document.getElementById('save-key-btn');
-    const status = document.getElementById('key-status');
+    const saved = document.getElementById('key-saved');
+    const savedText = document.getElementById('key-saved-text');
 
-    // Show current state
-    const existing = localStorage.getItem('chesslens_api_key');
-    if (existing) {
-        status.textContent = 'API key is saved.';
-        input.placeholder = 'Key saved — enter a new one to replace';
-    }
-
-    btn.addEventListener('click', () => {
-        const key = input.value.trim();
-        if (!key) {
-            status.textContent = 'Please enter a key.';
-            return;
+    function reflect() {
+        const existing = localStorage.getItem('chesslens_api_key');
+        if (existing) {
+            saved.hidden = false;
+            savedText.textContent = 'API key saved';
+            input.placeholder = 'Key saved — enter a new one to replace';
+        } else {
+            saved.hidden = true;
         }
+    }
+    reflect();
+
+    function save() {
+        const key = input.value.trim();
+        if (!key) return;
         localStorage.setItem('chesslens_api_key', key);
         input.value = '';
-        input.placeholder = 'Key saved — enter a new one to replace';
-        status.textContent = 'API key saved to browser storage.';
-    });
+        reflect();
+    }
+
+    btn.addEventListener('click', save);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); });
 });
 </script>
 {% endblock %}
