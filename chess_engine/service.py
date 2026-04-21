@@ -283,6 +283,12 @@ class PooledEngineService(EngineService):
                         played_move_candidate = pm_candidates[0]
                         if pv_length is not None:
                             played_move_candidate.pv = played_move_candidate.pv[:pv_length]
+                        # Mirror candidate PV-end pass for the played move so
+                        # out-of-top-N plays get the same drift/leverage signal.
+                        if pv_end_nodes is not None:
+                            played_move_candidate.pv_end = await _compute_pv_end(
+                                engine, board, played_move_candidate.pv, pv_end_limit
+                            )
 
             # Reset Elo constraints after request so next caller gets clean state
             if uci_options and "UCI_LimitStrength" in uci_options:
