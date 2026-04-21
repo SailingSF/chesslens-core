@@ -41,6 +41,70 @@ def _material_balance(board: chess.Board, color: chess.Color) -> int:
     return total
 
 
+def _static_exchange_eval(
+    board: chess.Board,
+    to_square: chess.Square,
+    attacker_square: chess.Square,
+) -> int:
+    """
+    Standard swap-list SEE. Returns the net material gain, in pawns, for the
+    side initiating the capture on `to_square` with the piece on
+    `attacker_square`, assuming both sides play optimal recaptures using their
+    smallest available attacker.
+
+    Positive = attacker ends up ahead; 0 = clean trade; negative = losing
+    capture. Pins and X-ray attacks through the pushed attacker are not
+    modeled — this is a one-square exchange heuristic, not a full tactical
+    search.
+    """
+    target = board.piece_at(to_square)
+    attacker = board.piece_at(attacker_square)
+    if target is None or attacker is None:
+        return 0
+
+    gains = [PIECE_VALUES.get(target.piece_type, 0)]
+    on_square_value = PIECE_VALUES.get(attacker.piece_type, 0)
+
+    temp = board.copy(stack=False)
+    initial_move = chess.Move(attacker_square, to_square)
+    if attacker.piece_type == chess.PAWN and chess.square_rank(to_square) in (0, 7):
+        initial_move = chess.Move(attacker_square, to_square, promotion=chess.QUEEN)
+    if initial_move not in temp.legal_moves:
+        return 0
+    temp.push(initial_move)
+
+    while True:
+        side_to_capture = temp.turn
+        attackers = temp.attackers(side_to_capture, to_square)
+        if not attackers:
+            break
+        smallest_sq = None
+        smallest_val = 10
+        for sq in attackers:
+            piece = temp.piece_at(sq)
+            if piece is None:
+                continue
+            val = PIECE_VALUES.get(piece.piece_type, 0)
+            if val < smallest_val:
+                smallest_val = val
+                smallest_sq = sq
+        if smallest_sq is None:
+            break
+        recapture = chess.Move(smallest_sq, to_square)
+        piece = temp.piece_at(smallest_sq)
+        if piece.piece_type == chess.PAWN and chess.square_rank(to_square) in (0, 7):
+            recapture = chess.Move(smallest_sq, to_square, promotion=chess.QUEEN)
+        if recapture not in temp.legal_moves:
+            break
+        gains.append(on_square_value - gains[-1])
+        on_square_value = smallest_val
+        temp.push(recapture)
+
+    for i in range(len(gains) - 1, 0, -1):
+        gains[i - 1] = -max(-gains[i - 1], gains[i])
+    return gains[0]
+
+
 def _is_heavy_piece_sacrifice(
     board_before: chess.Board,
     board_after: chess.Board,
@@ -126,20 +190,25 @@ def is_concrete_blunder(
     played_candidate: Optional[CandidateMove],
     side: chess.Color,
     ep_loss: Optional[float] = None,
+    config: Optional[ClassificationConfig] = None,
 ) -> bool:
     """
     Chess.com's blunder requires concrete damage, not just a large EP drop.
     A move is a concrete blunder if it:
       1. Allows forced mate (opponent has mate after this move)
       2. Loses material on the move (hangs a piece, losing trade)
-      3. Leaves material hanging (opponent can capture and gain material)
-      4. Has an extremely large EP loss (>= 0.35) — tactical combinations that
-         take 2-3 moves to win material are beyond our shallow analysis, but
-         nearly always involve concrete damage at this magnitude
+      3. Leaves material hanging — opponent has a capture whose static
+         exchange evaluation nets at least `blunder_min_hanging_see` pawns
+      4. Has a large EP loss combined with any concrete threat (SEE>=1 or
+         EP >= blunder_pure_ep_floor — the latter covers multi-move tactical
+         sequences beyond the shallow exchange check)
 
-    If none of these hold, the move is a positional collapse — still bad,
-    but classified as "mistake" rather than "blunder".
+    The SEE check in gate 3 replaces an earlier 1-ply "is this piece defended?"
+    test that over-fired on undefended pawns and on captures that walked into
+    recapture sequences losing for the attacker.
     """
+    c = config or ClassificationConfig()
+
     # Gate 1: allows forced mate
     if played_candidate is not None and played_candidate.mate_in is not None:
         if played_candidate.mate_in < 0:
@@ -157,29 +226,32 @@ def is_concrete_blunder(
     if net_after < net_before:
         return True
 
-    # Gate 3: leaves material hanging — opponent has a capture that gains material
+    # Gate 3: leaves material hanging (SEE-verified)
+    best_see = 0
     for opp_move in board_after.legal_moves:
         if not board_after.is_capture(opp_move):
             continue
-        captured_piece = board_after.piece_at(opp_move.to_square)
-        if captured_piece is None:
-            # en passant
-            if board_after.is_en_passant(opp_move):
-                return True
-            continue
-        captured_value = PIECE_VALUES.get(captured_piece.piece_type, 0)
-        attacker = board_after.piece_at(opp_move.from_square)
-        attacker_value = PIECE_VALUES.get(attacker.piece_type, 0) if attacker else 0
-        # Undefended piece or favorable trade (capturing higher value with lower)
-        if captured_value > attacker_value:
-            return True
-        if captured_value > 0 and not board_after.is_attacked_by(side, opp_move.to_square):
-            return True
+        if board_after.is_en_passant(opp_move):
+            see_value = PIECE_VALUES[chess.PAWN]
+        else:
+            see_value = _static_exchange_eval(
+                board_after, opp_move.to_square, opp_move.from_square
+            )
+        if see_value > best_see:
+            best_see = see_value
 
-    # Gate 4: very large EP loss almost always involves concrete material loss
-    # through a multi-move tactical sequence our shallow checks can't see
-    if ep_loss is not None and ep_loss >= 0.35:
+    if best_see >= c.blunder_min_hanging_see:
         return True
+
+    # Gate 4: large EP loss — require at least some concrete material signal
+    # to avoid flagging pure-positional collapses as blunders. The
+    # `blunder_pure_ep_floor` override keeps truly catastrophic drops (which
+    # almost always hide multi-move tactics) in the blunder bucket.
+    if ep_loss is not None:
+        if ep_loss >= c.blunder_ep_floor and best_see >= 1:
+            return True
+        if ep_loss >= c.blunder_pure_ep_floor:
+            return True
 
     return False
 
@@ -474,8 +546,58 @@ def _best_move_wins_material(
     return False
 
 
+def _has_concrete_opportunity(
+    best_candidate: Optional[CandidateMove],
+    board_before: Optional[chess.Board],
+    mover_best_win_pct: float,
+    side: Optional[chess.Color],
+    config: ClassificationConfig,
+) -> bool:
+    """
+    True if the best move leads to a concrete tactical gain: forced mate,
+    material win inside the PV, or a win-probability threshold crossing.
+    """
+    if best_candidate is not None:
+        if best_candidate.mate_in is not None and best_candidate.mate_in > 0:
+            return True
+
+        if board_before is not None and best_candidate.pv:
+            temp = board_before.copy()
+            try:
+                temp.push(best_candidate.move)
+                if _best_move_wins_material(
+                    temp, best_candidate.pv[1:], side or chess.WHITE,
+                    depth=config.miss_best_wins_material_depth,
+                ):
+                    return True
+            except Exception:
+                pass
+
+    return mover_best_win_pct >= config.miss_best_win_pct_threshold
+
+
+def _best_move_is_forcing(
+    best_candidate: CandidateMove,
+    board_before: chess.Board,
+) -> bool:
+    """
+    True if the best move is a check, capture, or leads to forced mate —
+    the tactical-character signal used by Trigger C.
+    """
+    if best_candidate.mate_in is not None and best_candidate.mate_in > 0:
+        return True
+    if board_before.is_capture(best_candidate.move):
+        return True
+    temp = board_before.copy()
+    try:
+        temp.push(best_candidate.move)
+    except Exception:
+        return False
+    return temp.is_check()
+
+
 def detect_miss(
-    prev_context: AssembledContext,
+    prev_context: Optional[AssembledContext],
     best_win_pct: float,
     played_win_pct: float,
     ep_loss: float,
@@ -484,63 +606,62 @@ def detect_miss(
     side: Optional[chess.Color] = None,
     elo: Optional[int] = None,
     config: Optional[ClassificationConfig] = None,
+    candidate_gap_cp: Optional[int] = None,
 ) -> bool:
     """
-    Returns True if the player missed capitalizing on opponent's mistake.
+    Returns True if the player missed capitalizing on a concrete opportunity.
 
-    Chess.com's miss requires a concrete missed opportunity:
-      1. Opponent created an opportunity (their previous move had significant EP loss)
-      2. Best reply achieves a concrete gain (wins material, finds mate, or reaches
-         clearly winning territory)
-      3. Player failed to capitalize (their move lost meaningful EP)
+    Two parallel triggers qualify as a miss — both require the player to have
+    lost meaningful EP and a concrete opportunity to have existed:
 
-    Unlike inaccuracy/mistake/blunder, miss is contextual: the same EP loss
-    that would be an inaccuracy in a normal position becomes a miss when the
-    opponent just blundered and there was a concrete punishment available.
+    Trigger A (opponent-blunder): opponent's previous move had significant EP
+    loss (or was labeled mistake/blunder/miss) and the best reply achieves a
+    concrete gain.
+
+    Trigger C (direct tactic missed): a significantly better move existed —
+    large candidate gap between best and 2nd-best, best move is forcing
+    (check/capture/mate), and the player wasn't already losing. Captures the
+    pattern where the played move is "fine" in isolation but a decisive tactic
+    was available. Fires independently of Trigger A's opponent-blunder gate.
     """
     c = config or ClassificationConfig()
     mover_best_win_pct = _white_pov_to_side_win_pct(best_win_pct, side)
 
-    # Condition 1: opponent's previous move created an opportunity
-    prev_ep_loss = prev_context.ep_loss
-    prev_label = prev_context.cp_loss_label
-    if (
-        (prev_ep_loss is None or prev_ep_loss < c.miss_opponent_ep_loss_threshold)
-        and prev_label not in {"mistake", "blunder", "miss"}
-    ):
-        return False
-
-    # Condition 2: player's move loses meaningful expected points
+    # Shared gate: player's move loses meaningful EP
     if ep_loss < c.miss_min_ep_loss:
         return False
 
-    # Condition 3: best reply achieves a concrete gain
-    # At least one of: wins material, finds mate, or reaches clearly winning
-    has_concrete_opportunity = False
+    # Shared gate: best move leads to a concrete gain (mate, material, or WP threshold)
+    if not _has_concrete_opportunity(
+        best_candidate, board_before, mover_best_win_pct, side, c,
+    ):
+        return False
 
-    if best_candidate is not None:
-        # 3a: best move finds forced mate
-        if best_candidate.mate_in is not None and best_candidate.mate_in > 0:
-            has_concrete_opportunity = True
+    # Trigger A: opponent's previous move created the opportunity
+    trigger_a = False
+    if prev_context is not None:
+        prev_ep_loss = prev_context.ep_loss
+        prev_label = prev_context.cp_loss_label
+        if (
+            (prev_ep_loss is not None and prev_ep_loss >= c.miss_opponent_ep_loss_threshold)
+            or prev_label in {"mistake", "blunder", "miss"}
+        ):
+            trigger_a = True
 
-        # 3b: best PV wins material within N half-moves
-        if (not has_concrete_opportunity
-                and board_before is not None
-                and best_candidate.pv):
-            # Push best move first, then check PV for material gain
-            temp = board_before.copy()
-            try:
-                temp.push(best_candidate.move)
-                if _best_move_wins_material(
-                    temp, best_candidate.pv[1:], side or chess.WHITE,
-                    depth=c.miss_best_wins_material_depth,
-                ):
-                    has_concrete_opportunity = True
-            except Exception:
-                pass
+    if trigger_a:
+        return True
 
-    # 3c: best reply crosses into clearly winning territory
-    if not has_concrete_opportunity and mover_best_win_pct >= c.miss_best_win_pct_threshold:
-        has_concrete_opportunity = True
+    # Trigger C: direct tactic missed — large candidate gap + forcing best move
+    # Fires without an opponent-blunder context. Gate on mover not already
+    # losing so we don't punish futile positions.
+    if (
+        best_candidate is not None
+        and board_before is not None
+        and candidate_gap_cp is not None
+        and candidate_gap_cp >= c.miss_direct_tactic_min_gap_cp
+        and mover_best_win_pct >= c.miss_direct_tactic_min_mover_wp
+        and _best_move_is_forcing(best_candidate, board_before)
+    ):
+        return True
 
-    return has_concrete_opportunity
+    return False

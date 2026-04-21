@@ -108,6 +108,22 @@ class ClassificationConfig:
     # forced and should not qualify as "great" regardless of candidate gap.
     great_max_forced_check_moves: int = 3
 
+    # --- Concrete blunder gate ---
+    # Gate 3 (hanging piece): minimum static-exchange value of opponent's best
+    # capture after the played move. Must be >= 1 so that only captures that
+    # actually net material fire the gate — the earlier 1-ply "is defended?"
+    # check over-fired on undefended pawns and on captures that walked into
+    # losing recapture sequences.
+    blunder_min_hanging_see: int = 1
+    # Gate 4 (EP floor): if the player lost at least this much EP, we still
+    # require at least SEE>=1 before calling the move a concrete blunder.
+    # Below this floor, moves go to mistake/miss regardless of EP.
+    blunder_ep_floor: float = 0.35
+    # Pure-EP override: a drop this large on its own is enough evidence of a
+    # multi-move tactical sequence to qualify as a blunder without any
+    # one-ply material signal.
+    blunder_pure_ep_floor: float = 0.40
+
     # --- Miss detection ---
     # Chess.com's miss requires a concrete missed opportunity, not just EP loss.
     # Opponent must have created a real chance (tactical/material), best reply must
@@ -117,3 +133,11 @@ class ClassificationConfig:
     miss_blunder_override_min_prev_ep: float = 0.30  # opponent's prev EP loss required for miss to override blunder
     miss_best_wins_material_depth: int = 4         # half-moves to check material gain in best PV
     miss_best_win_pct_threshold: float = 0.70      # best reply must reach this for "clearly winning" gate
+
+    # --- Miss Trigger C: direct tactic missed ---
+    # Fires when a significantly better move existed (large candidate gap + forcing
+    # character) regardless of whether the opponent's prior move was clearly bad.
+    # Captures positions where the player made a "reasonable" move while a
+    # concrete tactic was available — classic chess.com "miss" pattern.
+    miss_direct_tactic_min_gap_cp: int = 250       # gap between best and 2nd-best candidate
+    miss_direct_tactic_min_mover_wp: float = 0.15  # don't fire when already losing

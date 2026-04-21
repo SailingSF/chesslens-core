@@ -252,7 +252,15 @@ class ContextAssembler:
         if label == "blunder" and played_move is not None and played_candidate is not None:
             board_after_gate = board.copy()
             board_after_gate.push(played_move)
-            if not is_concrete_blunder(board, board_after_gate, played_move, played_candidate, board.turn, ep_loss=ep_loss_val):
+            if not is_concrete_blunder(
+                board,
+                board_after_gate,
+                played_move,
+                played_candidate,
+                board.turn,
+                ep_loss=ep_loss_val,
+                config=self._config,
+            ):
                 label = "mistake"
 
         # --- Special classification checks ---
@@ -293,14 +301,14 @@ class ContextAssembler:
                 candidate_gap_cp=candidate_gap_cp,
             )
 
-            # Check Miss (requires previous move context + concrete opportunity)
-            if prev_context is not None:
-                is_miss = detect_miss(
-                    prev_context=prev_context, best_win_pct=best_win_pct,
-                    played_win_pct=played_win_pct, ep_loss=ep_loss_val,
-                    best_candidate=best, board_before=board,
-                    side=side, elo=player_elo, config=self._config,
-                )
+            # Check Miss — Trigger A needs prev_context, Trigger C does not.
+            is_miss = detect_miss(
+                prev_context=prev_context, best_win_pct=best_win_pct,
+                played_win_pct=played_win_pct, ep_loss=ep_loss_val,
+                best_candidate=best, board_before=board,
+                side=side, elo=player_elo, config=self._config,
+                candidate_gap_cp=candidate_gap_cp,
+            )
 
             # Override label for special classifications
             # Priority: brilliant > great > miss > base label
