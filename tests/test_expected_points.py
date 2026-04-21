@@ -713,6 +713,86 @@ class TestMissDetection:
         )
         assert result is True
 
+    # --- Trigger C: direct tactic missed (no opponent-blunder required) ---
+
+    def test_trigger_c_fires_on_forking_check_with_large_gap(self):
+        """Fork check (Nf6+ winning queen) with huge candidate gap and no prev context."""
+        # White knight e4, black king g8, black queen d7; Nf6+ forks king and queen.
+        board = chess.Board("6k1/3q4/8/8/4N3/8/8/4K3 w - - 0 1")
+        best_move = board.parse_san("Nf6+")
+        best_candidate = CandidateMove(
+            move=best_move, score_cp=800, mate_in=None, pv=[best_move],
+        )
+        result = detect_miss(
+            prev_context=None,
+            best_win_pct=0.88,
+            played_win_pct=0.55,
+            ep_loss=0.33,
+            best_candidate=best_candidate,
+            board_before=board,
+            side=chess.WHITE,
+            candidate_gap_cp=500,
+        )
+        assert result is True
+
+    def test_trigger_c_does_not_fire_with_small_gap(self):
+        """Same forking position but candidate gap below threshold — no miss."""
+        board = chess.Board("6k1/3q4/8/8/4N3/8/8/4K3 w - - 0 1")
+        best_move = board.parse_san("Nf6+")
+        best_candidate = CandidateMove(
+            move=best_move, score_cp=800, mate_in=None, pv=[best_move],
+        )
+        result = detect_miss(
+            prev_context=None,
+            best_win_pct=0.88,
+            played_win_pct=0.55,
+            ep_loss=0.33,
+            best_candidate=best_candidate,
+            board_before=board,
+            side=chess.WHITE,
+            candidate_gap_cp=100,
+        )
+        assert result is False
+
+    def test_trigger_c_does_not_fire_on_quiet_best_move(self):
+        """Best move is a quiet pawn push (not a check/capture/mate) — no miss."""
+        board = chess.Board("4k3/8/4P3/8/8/8/8/4K3 w - - 0 1")
+        best_move = board.parse_san("e7")
+        best_candidate = CandidateMove(
+            move=best_move, score_cp=500, mate_in=None, pv=[best_move],
+        )
+        result = detect_miss(
+            prev_context=None,
+            best_win_pct=0.90,
+            played_win_pct=0.50,
+            ep_loss=0.40,
+            best_candidate=best_candidate,
+            board_before=board,
+            side=chess.WHITE,
+            candidate_gap_cp=500,
+        )
+        assert result is False
+
+    def test_trigger_c_does_not_fire_when_mover_already_losing(self):
+        """Even with a forcing best move and large gap, don't fire when already toast."""
+        board = chess.Board("6k1/3q4/8/8/4N3/8/8/4K3 w - - 0 1")
+        best_move = board.parse_san("Nf6+")
+        # Best leads to mate → concrete opportunity gate passes via mate_in
+        best_candidate = CandidateMove(
+            move=best_move, score_cp=None, mate_in=2, pv=[best_move],
+        )
+        result = detect_miss(
+            prev_context=None,
+            best_win_pct=0.10,   # mover WP 0.10 < 0.15 gate
+            played_win_pct=0.05,
+            ep_loss=0.20,
+            best_candidate=best_candidate,
+            board_before=board,
+            side=chess.WHITE,
+            candidate_gap_cp=500,
+        )
+        assert result is False
+
 
 # ===========================================================================
 # Material Balance Helper

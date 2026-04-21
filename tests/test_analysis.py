@@ -128,9 +128,11 @@ def test_cp_loss_with_mate_best_move():
     assembler = ContextAssembler()
     ctx = assembler.assemble(board, result, played_move=moves[1])
     assert ctx.played_move_cp_loss is not None
-    # Large EP loss but no concrete damage (synthetic starting position),
-    # so the blunder gate demotes to "mistake".
-    assert ctx.cp_loss_label == "mistake"
+    # Best move is mate-in-3 with a huge candidate gap — Trigger C (direct
+    # tactic missed) fires: best is forcing (mate), gap >> 250cp, mover
+    # winning. The blunder gate would have demoted to "mistake" on EP alone,
+    # but the missed-mate pattern is more informative.
+    assert ctx.cp_loss_label == "miss"
 
 
 # --- Pawn structure ---
@@ -239,3 +241,64 @@ def test_piece_activity_structure():
     assert "black_bishop_pair" in activity
     assert "white_rooks_open_files" in activity
     assert "white_king_danger" in activity
+
+
+# --- Static exchange evaluation & concrete blunder gate ---
+
+from analysis.special_moves import _static_exchange_eval, is_concrete_blunder
+from chess_engine.service import CandidateMove
+
+
+def test_see_wins_undefended_pawn():
+    # Black knight on f6 captures undefended white pawn on e4
+    board = chess.Board("4k3/8/5n2/8/4P3/8/8/4K3 b - - 0 1")
+    attackers = list(board.attackers(chess.BLACK, chess.E4))
+    assert attackers, "knight should attack e4"
+    see = _static_exchange_eval(board, chess.E4, attackers[0])
+    assert see == 1
+
+
+def test_see_losing_queen_for_pawn():
+    # White queen captures defended black pawn — loses queen for pawn + pawn
+    board = chess.Board("4k3/5p2/4p3/8/2Q5/8/8/4K3 w - - 0 1")
+    see = _static_exchange_eval(board, chess.E6, chess.C4)
+    assert see <= -7
+
+
+def test_see_clean_piece_win():
+    # White knight on c4 wins undefended knight on d6
+    board = chess.Board("4k3/8/3n4/8/2N5/8/8/4K3 w - - 0 1")
+    see = _static_exchange_eval(board, chess.D6, chess.C4)
+    assert see == 3
+
+
+def test_concrete_blunder_does_not_fire_on_undefended_pawn_only():
+    # White pushed pawn e4 — black can win undefended pawn with Nxe4.
+    # This is a one-pawn hang with ep_loss=0; should NOT trigger concrete blunder
+    # (the old 1-ply check would have fired since e4 is undefended).
+    board_before = chess.Board("4k3/8/5n2/8/8/4P3/8/4K3 w - - 0 1")
+    move = board_before.parse_san("e4")
+    board_after = board_before.copy()
+    board_after.push(move)
+    played = CandidateMove(move=move, score_cp=0, mate_in=None, pv=[move])
+    # With SEE threshold >=2 (default is 1 — a pawn hang still fires), set
+    # ep_loss small so gate 4 doesn't interfere.
+    from config.classification import ClassificationConfig
+    cfg = ClassificationConfig(blunder_min_hanging_see=2)
+    assert not is_concrete_blunder(
+        board_before, board_after, move, played, chess.WHITE,
+        ep_loss=0.15, config=cfg,
+    )
+
+
+def test_concrete_blunder_fires_on_hanging_piece():
+    # White hangs the queen (moves it to an attacked, undefended square)
+    board_before = chess.Board("4k3/8/5n2/8/8/8/1Q6/4K3 w - - 0 1")
+    move = board_before.parse_san("Qe5")  # black knight on f6 attacks e5; queen undefended
+    board_after = board_before.copy()
+    board_after.push(move)
+    played = CandidateMove(move=move, score_cp=0, mate_in=None, pv=[move])
+    assert is_concrete_blunder(
+        board_before, board_after, move, played, chess.WHITE,
+        ep_loss=0.5,
+    )
