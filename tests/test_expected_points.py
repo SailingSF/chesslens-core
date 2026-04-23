@@ -20,8 +20,11 @@ from analysis.expected_points import (
     SigmoidWDLProvider,
     StockfishNativeWDLProvider,
     classify_ep_loss,
+    draw_sensitivity_factor,
+    pv_end_win_pct,
     resolve_provider,
 )
+from chess_engine.service import PVEndEval
 from analysis.special_moves import (
     _material_balance,
     _pv_has_checkmate,
@@ -977,6 +980,455 @@ class TestContextAssemblerEP:
         assert ctx.ep_loss > 0.0
         # The eval went from +30 to +200 for white, so black lost significant EP
         assert ctx.cp_loss_label not in ("best", "excellent")
+
+    def test_draw_boost_preserves_good_below_gate(self):
+        """Near-drawn positions must NOT demote good moves to inaccuracy.
+
+        The draw boost is gated at `draw_boost_min_ep_loss` (default 0.05) so
+        best / excellent / good plays stay untouched — otherwise structurally
+        drawish positions would wrongly demote near-best moves. Only moves
+        already above the `good` bucket receive the severity-tightening scale.
+        """
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        # Raw ep_loss ≈ 0.04 (good bucket) with best_wdl_draw=800‰ — aggressive
+        # factor would have boosted this past the inaccuracy line, but the
+        # gate keeps it at good.
+        result = EngineResult(
+            fen=board.fen(), depth=20,
+            candidates=[
+                CandidateMove(
+                    move=moves[0], score_cp=20, mate_in=None, pv=[moves[0]],
+                    wdl_win=150, wdl_draw=800, wdl_loss=50,
+                ),
+                CandidateMove(
+                    move=moves[1], score_cp=-20, mate_in=None, pv=[moves[1]],
+                    wdl_win=110, wdl_draw=800, wdl_loss=90,
+                ),
+            ],
+        )
+
+        # Even with an aggressive factor, the default gate keeps this at `good`.
+        gated = ClassificationConfig(
+            draw_boost_min_permille=400, draw_boost_max_factor=1.80,
+        )
+        gated_ctx = ContextAssembler(classification_config=gated).assemble(
+            board, result, played_move=moves[1]
+        )
+        assert gated_ctx.cp_loss_label == "good"
+
+        # Removing the gate restores the old demoting behaviour — proves the
+        # gate is the mechanism responsible, not unrelated changes.
+        ungated = ClassificationConfig(
+            draw_boost_min_permille=400, draw_boost_max_factor=1.80,
+            draw_boost_min_ep_loss=0.0,
+        )
+        ungated_ctx = ContextAssembler(classification_config=ungated).assemble(
+            board, result, played_move=moves[1]
+        )
+        assert ungated_ctx.cp_loss_label == "inaccuracy"
+
+    def test_draw_boost_tightens_inaccuracy_to_mistake(self):
+        """Above the gate, the draw boost still escalates severity classes.
+
+        Raw ep_loss ≈ 0.085 sits in `inaccuracy`. With best_wdl_draw=800‰ and
+        the default (min=500, max=1.30) ramp the factor is ~1.20, pushing the
+        effective ep_loss past 0.10 into `mistake`. This is the intended
+        behaviour — severity plays in drawish positions are under-penalised
+        by the raw thresholds.
+        """
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        result = EngineResult(
+            fen=board.fen(), depth=20,
+            candidates=[
+                CandidateMove(
+                    move=moves[0], score_cp=20, mate_in=None, pv=[moves[0]],
+                    wdl_win=150, wdl_draw=800, wdl_loss=50,   # wp = 0.55
+                ),
+                CandidateMove(
+                    move=moves[1], score_cp=-20, mate_in=None, pv=[moves[1]],
+                    wdl_win=60, wdl_draw=800, wdl_loss=140,   # wp = 0.46 → ep ≈ 0.09
+                ),
+            ],
+        )
+
+        off = ClassificationConfig(draw_boost_max_factor=1.0)
+        baseline_ctx = ContextAssembler(classification_config=off).assemble(
+            board, result, played_move=moves[1]
+        )
+        assert baseline_ctx.cp_loss_label == "inaccuracy"
+
+        boosted = ClassificationConfig()  # defaults: min=500, max=1.30, gate=0.05
+        boosted_ctx = ContextAssembler(classification_config=boosted).assemble(
+            board, result, played_move=moves[1]
+        )
+        assert boosted_ctx.cp_loss_label == "mistake"
+
+    def test_draw_boost_changes_bucket_without_mutating_stored_ep_loss(self):
+        """Drawishness should act like a threshold adjustment, not rewrite ep_loss."""
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        result = EngineResult(
+            fen=board.fen(), depth=20,
+            candidates=[
+                CandidateMove(
+                    move=moves[0], score_cp=20, mate_in=None, pv=[moves[0]],
+                    wdl_win=150, wdl_draw=800, wdl_loss=50,
+                ),
+                CandidateMove(
+                    move=moves[1], score_cp=-20, mate_in=None, pv=[moves[1]],
+                    wdl_win=60, wdl_draw=800, wdl_loss=140,
+                ),
+            ],
+        )
+
+        baseline_ctx = ContextAssembler(
+            classification_config=ClassificationConfig(draw_boost_max_factor=1.0)
+        ).assemble(board, result, played_move=moves[1])
+        boosted_ctx = ContextAssembler(
+            classification_config=ClassificationConfig()
+        ).assemble(board, result, played_move=moves[1])
+
+        assert baseline_ctx.ep_loss == pytest.approx(boosted_ctx.ep_loss, abs=1e-9)
+        assert baseline_ctx.cp_loss_label == "inaccuracy"
+        assert boosted_ctx.cp_loss_label == "mistake"
+
+    def test_draw_boost_disabled_by_default_when_factor_is_one(self):
+        """Setting draw_boost_max_factor=1.0 is the documented kill-switch."""
+        assert draw_sensitivity_factor(900, ClassificationConfig(draw_boost_max_factor=1.0)) == 1.0
+
+    def test_draw_boost_ignores_low_draw_permille(self):
+        """Decisive positions (low wdl_draw) should not receive any boost."""
+        cfg = ClassificationConfig(draw_boost_min_permille=500, draw_boost_max_factor=1.3)
+        assert draw_sensitivity_factor(100, cfg) == 1.0
+        assert draw_sensitivity_factor(499, cfg) == 1.0
+        assert draw_sensitivity_factor(None, cfg) == 1.0
+
+    def test_draw_boost_ramps_linearly(self):
+        """At the midpoint of the ramp, the factor is halfway to the max."""
+        cfg = ClassificationConfig(draw_boost_min_permille=400, draw_boost_max_factor=1.40)
+        # at 1000‰: 1.40
+        assert draw_sensitivity_factor(1000, cfg) == pytest.approx(1.40, abs=1e-6)
+        # midpoint (700‰): 1.20
+        assert draw_sensitivity_factor(700, cfg) == pytest.approx(1.20, abs=1e-6)
+
+    def test_pv_end_lifts_hidden_drift_into_stricter_bucket(self):
+        """When played's PV drifts far worse than root eval, EP loss escalates.
+
+        Root eval makes the played move look like an `inaccuracy` (small cp
+        gap past the pv_end gate of 0.05). Walking the played PV to its
+        endpoint exposes a much larger swing, which should bump the label.
+        """
+        board = chess.Board()
+        moves = list(board.legal_moves)
+
+        best = CandidateMove(
+            move=moves[0], score_cp=40, mate_in=None, pv=[moves[0]],
+            pv_end=PVEndEval(
+                score_cp=40, mate_in=None, depth=20, seldepth=25,
+                pushed=4, fen="", terminal=None,
+            ),
+        )
+        played = CandidateMove(
+            move=moves[1], score_cp=-40, mate_in=None, pv=[moves[1]],
+            # played looks like an inaccuracy at the root (~0.06 ep_loss) but
+            # its pv_end reveals a -500cp collapse at the endpoint.
+            pv_end=PVEndEval(
+                score_cp=-500, mate_in=None, depth=20, seldepth=25,
+                pushed=4, fen="", terminal=None,
+            ),
+        )
+        result = EngineResult(fen=board.fen(), depth=20, candidates=[best, played])
+
+        off = ClassificationConfig(pv_end_ep_loss_enabled=False)
+        baseline_ctx = ContextAssembler(classification_config=off).assemble(
+            board, result, played_move=moves[1]
+        )
+        on = ClassificationConfig(pv_end_ep_loss_enabled=True)
+        lifted_ctx = ContextAssembler(classification_config=on).assemble(
+            board, result, played_move=moves[1]
+        )
+
+        assert baseline_ctx.ep_loss < lifted_ctx.ep_loss
+        assert baseline_ctx.cp_loss_label == "inaccuracy"
+        assert lifted_ctx.cp_loss_label in ("mistake", "blunder")
+
+    def test_out_of_top_window_move_uses_exact_played_eval(self):
+        """EngineResult.played_move should populate EP data for rank-4+ plays."""
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        played_move = moves[3]
+        result = EngineResult(
+            fen=board.fen(),
+            depth=20,
+            candidates=[
+                CandidateMove(move=moves[0], score_cp=40, mate_in=None, pv=[moves[0]]),
+                CandidateMove(move=moves[1], score_cp=20, mate_in=None, pv=[moves[1]]),
+                CandidateMove(move=moves[2], score_cp=10, mate_in=None, pv=[moves[2]]),
+            ],
+            played_move=CandidateMove(
+                move=played_move, score_cp=-50, mate_in=None, pv=[played_move]
+            ),
+        )
+
+        ctx = ContextAssembler().assemble(board, result, played_move=played_move)
+
+        assert ctx.win_pct_after is not None
+        assert ctx.ep_loss is not None
+        assert ctx.played_move_cp_loss == 90
+        assert ctx.cp_loss_label != "unknown"
+
+    def test_pv_end_lifts_out_of_top_window_play_using_played_drift(self):
+        """Rank-4+ exact-eval plays should use their own PV-end drift as severity."""
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        played_move = moves[3]
+        result = EngineResult(
+            fen=board.fen(),
+            depth=20,
+            candidates=[
+                CandidateMove(
+                    move=moves[0], score_cp=40, mate_in=None, pv=[moves[0]],
+                    pv_end=PVEndEval(
+                        score_cp=40, mate_in=None, depth=20, seldepth=25,
+                        pushed=4, fen="", terminal=None,
+                    ),
+                ),
+                CandidateMove(move=moves[1], score_cp=20, mate_in=None, pv=[moves[1]]),
+                CandidateMove(move=moves[2], score_cp=10, mate_in=None, pv=[moves[2]]),
+            ],
+            played_move=CandidateMove(
+                move=played_move, score_cp=-40, mate_in=None, pv=[played_move],
+                pv_end=PVEndEval(
+                    score_cp=-500, mate_in=None, depth=20, seldepth=25,
+                    pushed=4, fen="", terminal=None,
+                ),
+            ),
+        )
+
+        baseline_ctx = ContextAssembler(
+            classification_config=ClassificationConfig(pv_end_ep_loss_enabled=False)
+        ).assemble(board, result, played_move=played_move)
+        lifted_ctx = ContextAssembler(
+            classification_config=ClassificationConfig(pv_end_ep_loss_enabled=True)
+        ).assemble(board, result, played_move=played_move)
+
+        assert baseline_ctx.ep_loss < lifted_ctx.ep_loss
+        assert baseline_ctx.cp_loss_label == "inaccuracy"
+        assert lifted_ctx.cp_loss_label in ("mistake", "blunder")
+
+    def test_rank4_generic_pv_end_gate_stays_conservative(self):
+        """The generic PV-end replacement should stay gated for rank-4+ goods."""
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        played_move = moves[3]
+        result = EngineResult(
+            fen=board.fen(),
+            depth=20,
+            candidates=[
+                CandidateMove(
+                    move=moves[0], score_cp=20, mate_in=None, pv=[moves[0]],
+                    pv_end=PVEndEval(
+                        score_cp=20, mate_in=None, depth=20, seldepth=25,
+                        pushed=4, fen="", terminal=None,
+                    ),
+                ),
+                CandidateMove(move=moves[1], score_cp=10, mate_in=None, pv=[moves[1]]),
+                CandidateMove(move=moves[2], score_cp=0, mate_in=None, pv=[moves[2]]),
+            ],
+            played_move=CandidateMove(
+                move=played_move, score_cp=-30, mate_in=None, pv=[played_move],
+                pv_end=PVEndEval(
+                    score_cp=-500, mate_in=None, depth=20, seldepth=25,
+                    pushed=4, fen="", terminal=None,
+                ),
+            ),
+        )
+
+        strict_rank4 = ContextAssembler(
+            classification_config=ClassificationConfig(
+                pv_end_min_ep_loss_rank4=0.05,
+                pv_end_min_lift_rank4=0.05,
+            )
+        ).assemble(board, result, played_move=played_move)
+        assert strict_rank4.cp_loss_label == "good"
+
+        default_rank4 = ContextAssembler(
+            classification_config=ClassificationConfig(
+                rank4_good_to_inaccuracy_min_draw_permille=10_000,
+                rank4_inaccuracy_to_mistake_min_future_ep=1.0,
+            )
+        ).assemble(board, result, played_move=played_move)
+        assert default_rank4.cp_loss_label == "good"
+
+    def test_rank4_future_override_bumps_good_to_inaccuracy(self):
+        """Rank-4+ future collapse should rescue drawish good->inaccuracy misses."""
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        played_move = moves[3]
+        result = EngineResult(
+            fen=board.fen(),
+            depth=20,
+            candidates=[
+                CandidateMove(
+                    move=moves[0],
+                    score_cp=20,
+                    mate_in=None,
+                    pv=[moves[0]],
+                    wdl_win=150,
+                    wdl_draw=700,
+                    wdl_loss=150,
+                    pv_end=PVEndEval(
+                        score_cp=20, mate_in=None, depth=20, seldepth=25,
+                        pushed=4, fen="", terminal=None,
+                    ),
+                ),
+                CandidateMove(move=moves[1], score_cp=10, mate_in=None, pv=[moves[1]]),
+                CandidateMove(move=moves[2], score_cp=0, mate_in=None, pv=[moves[2]]),
+            ],
+            played_move=CandidateMove(
+                move=played_move, score_cp=-10, mate_in=None, pv=[played_move],
+                wdl_win=110, wdl_draw=700, wdl_loss=190,
+                pv_end=PVEndEval(
+                    score_cp=-500, mate_in=None, depth=20, seldepth=25,
+                    pushed=4, fen="", terminal=None,
+                ),
+            ),
+        )
+
+        off = ContextAssembler(
+            classification_config=ClassificationConfig(
+                pv_end_min_ep_loss_rank4=1.0,
+                pv_end_min_lift_rank4=1.0,
+                rank4_good_to_inaccuracy_min_draw_permille=10_000,
+            )
+        ).assemble(board, result, played_move=played_move, player_elo=1000)
+        assert off.cp_loss_label == "good"
+
+        on = ContextAssembler(
+            classification_config=ClassificationConfig(
+                pv_end_min_ep_loss_rank4=1.0,
+                pv_end_min_lift_rank4=1.0,
+            )
+        ).assemble(board, result, played_move=played_move, player_elo=1000)
+        assert on.cp_loss_label == "inaccuracy"
+
+    def test_rank4_future_override_bumps_inaccuracy_to_mistake(self):
+        """Rank-4+ future collapse should rescue inaccuracy->mistake misses."""
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        played_move = moves[3]
+        result = EngineResult(
+            fen=board.fen(),
+            depth=20,
+            candidates=[
+                CandidateMove(
+                    move=moves[0], score_cp=40, mate_in=None, pv=[moves[0]],
+                    pv_end=PVEndEval(
+                        score_cp=40, mate_in=None, depth=20, seldepth=25,
+                        pushed=4, fen="", terminal=None,
+                    ),
+                ),
+                CandidateMove(move=moves[1], score_cp=20, mate_in=None, pv=[moves[1]]),
+                CandidateMove(move=moves[2], score_cp=10, mate_in=None, pv=[moves[2]]),
+            ],
+            played_move=CandidateMove(
+                move=played_move, score_cp=-40, mate_in=None, pv=[played_move],
+                pv_end=PVEndEval(
+                    score_cp=-500, mate_in=None, depth=20, seldepth=25,
+                    pushed=4, fen="", terminal=None,
+                ),
+            ),
+        )
+
+        off = ContextAssembler(
+            classification_config=ClassificationConfig(
+                pv_end_min_ep_loss_rank4=1.0,
+                pv_end_min_lift_rank4=1.0,
+                rank4_inaccuracy_to_mistake_min_future_ep=1.0,
+            )
+        ).assemble(board, result, played_move=played_move)
+        assert off.cp_loss_label == "inaccuracy"
+
+        on = ContextAssembler(
+            classification_config=ClassificationConfig(
+                pv_end_min_ep_loss_rank4=1.0,
+                pv_end_min_lift_rank4=1.0,
+            )
+        ).assemble(board, result, played_move=played_move)
+        assert on.cp_loss_label == "mistake"
+
+    def test_pv_end_lift_gated_by_root_ep_loss(self):
+        """Near-best and `good` plays (root ep_loss ≤ pv_end_min_ep_loss)
+        skip the lift.
+
+        Chess.com's best / excellent / good buckets are assigned from the root
+        eval without PV-drift adjustment; overriding them via pv_end regresses
+        those buckets more than it helps. The default gate (0.05) keeps plays
+        with small root ep_loss intact even when their pv_end drift is huge.
+        Opting out of the gate restores the demotion and confirms the gate is
+        the responsible mechanism.
+        """
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        best = CandidateMove(
+            move=moves[0], score_cp=20, mate_in=None, pv=[moves[0]],
+            pv_end=PVEndEval(
+                score_cp=20, mate_in=None, depth=20, seldepth=25,
+                pushed=4, fen="", terminal=None,
+            ),
+        )
+        # Root cp delta ≈ 30cp → ep_loss ~0.05 (top of the good bucket). Gate
+        # must keep this at `good`; ungated, pv_end pushes it to blunder.
+        played = CandidateMove(
+            move=moves[1], score_cp=-10, mate_in=None, pv=[moves[1]],
+            pv_end=PVEndEval(
+                score_cp=-500, mate_in=None, depth=20, seldepth=25,
+                pushed=4, fen="", terminal=None,
+            ),
+        )
+        result = EngineResult(fen=board.fen(), depth=20, candidates=[best, played])
+
+        gated = ContextAssembler(classification_config=ClassificationConfig()).assemble(
+            board, result, played_move=moves[1]
+        )
+        assert gated.cp_loss_label in ("best", "excellent", "good")
+
+        ungated = ContextAssembler(
+            classification_config=ClassificationConfig(pv_end_min_ep_loss=0.0)
+        ).assemble(board, result, played_move=moves[1])
+        assert ungated.cp_loss_label in ("inaccuracy", "mistake", "blunder")
+
+    def test_pv_end_gated_off_when_pv_too_shallow(self):
+        """If the PV was only 0-1 plies before ending, don't trust its drift."""
+        provider = SigmoidWDLProvider()
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        shallow = CandidateMove(
+            move=moves[0], score_cp=30, mate_in=None, pv=[moves[0]],
+            pv_end=PVEndEval(
+                score_cp=-500, mate_in=None, depth=None, seldepth=None,
+                pushed=1, fen="", terminal=None,
+            ),
+        )
+        assert pv_end_win_pct(shallow, provider, None, ClassificationConfig()) is None
+
+    def test_pv_end_skips_all_terminals(self):
+        """Synthesized terminal evals are degraded representations — the
+        helper returns None so the root eval handles them."""
+        provider = SigmoidWDLProvider()
+        board = chess.Board()
+        moves = list(board.legal_moves)
+        for terminal in ("stalemate", "draw", "checkmate"):
+            cand = CandidateMove(
+                move=moves[0], score_cp=0, mate_in=0, pv=[moves[0]],
+                pv_end=PVEndEval(
+                    score_cp=0, mate_in=0, depth=None, seldepth=None,
+                    pushed=5, fen="", terminal=terminal,
+                ),
+            )
+            assert pv_end_win_pct(cand, provider, None) is None, terminal
 
     def test_black_best_move_ep_loss_zero(self):
         """Black playing the best move should have ep_loss = 0."""
