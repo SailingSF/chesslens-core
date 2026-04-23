@@ -1,6 +1,6 @@
 # ChessLens Core
 
-**Run chess.com-style game reviews on your own computer.** ChessLens Core is an open-source chess analysis engine that uses [Stockfish](https://stockfishchess.org/) and the [Claude API](https://docs.anthropic.com/en/docs/overview) to classify every move in a game — best, excellent, good, inaccuracy, mistake, blunder, brilliant, great, miss — the same categories chess.com uses, with plain-language explanations of what went wrong (or right) and why.
+**Run chess.com-style game reviews on your own computer.** [ChessLens](https://chesslens.ai) is an open-source chess analysis engine that uses [Stockfish](https://stockfishchess.org/) and LLMs to classify every move in a game — best, excellent, good, inaccuracy, mistake, blunder, brilliant, great, miss — the same categories chess.com uses, with plain-language explanations of what went wrong (or right) and why in order to narrate your reviews and explain why particular moves perform better so that you can improve..
 
 No subscription required. Your games, your hardware, your analysis.
 
@@ -110,10 +110,3 @@ Full stack (app + engine container + Redis) at [http://localhost:8000](http://lo
 
 - **`tests/optimize_classification.py`** — parameter optimizer used to tune the classification model against chess.com ground truth. Development tool.
 - **`chesscom-review-download/`** — browser bookmarklet that exports chess.com review data as CSV, used to generate optimizer ground truth.
-- **Bot Match** and **Opening Lab** — live play modes, still in development.
-
----
-
-## Relationship to ChessLens Cloud
-
-This repo holds all chess intelligence. A separate private repo (`chesslens-cloud`) adds production infrastructure: user accounts, billing, distributed workers, PostgreSQL. Chess logic lives here; user management and infrastructure live there.
