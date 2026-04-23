@@ -141,3 +141,67 @@ class ClassificationConfig:
     # concrete tactic was available — classic chess.com "miss" pattern.
     miss_direct_tactic_min_gap_cp: int = 250       # gap between best and 2nd-best candidate
     miss_direct_tactic_min_mover_wp: float = 0.15  # don't fire when already losing
+
+    # --- Draw-sensitivity boost (ML-vs-core analysis, Theme 2) ---
+    # Chess.com penalises moderate EP loss more harshly in near-drawn positions
+    # than in decisive ones: a 50cp slip that turns a draw into a loss is an
+    # "inaccuracy" but the same cp loss while you're already +3 is "good".
+    # The 7-class ML-vs-core diff (796 games, ~46k moves) showed the three
+    # biggest confusion pairs on the "ML-right / core-wrong" slice all had
+    # `best_wdl_draw` around 530‰ vs 340‰ on the control — core was
+    # under-penalising EP loss whenever the game was structurally drawn.
+    # We multiply the computed ep_loss by a factor that ramps linearly from
+    # 1.0 at `draw_boost_min_permille` to `draw_boost_max_factor` at 1000‰.
+    # Set `draw_boost_max_factor = 1.0` to disable the adjustment entirely.
+    draw_boost_min_permille: int = 500
+    draw_boost_max_factor: float = 1.30
+    draw_boost_min_ep_loss: float = 0.05
+
+    # --- PV-endpoint EP loss (ML-vs-core analysis, Theme 4) ---
+    # The raw root eval of a non-top candidate is shallow — a 5-ply drift on
+    # the candidate's PV can reveal that what looked like a 20cp inaccuracy
+    # is really an 80cp mistake. When both the best and played candidates
+    # carry a `pv_end` re-evaluation, we compute a second ep_loss using the
+    # endpoint scores and take the stricter of the two. This lifts core on
+    # the rank-2/3/4 plays where it is weakest (~25-45% accuracy vs ~87%
+    # on rank-1 plays in the same corpus).
+    # `pv_end_min_pushed` gates out PVs that only managed 0-1 plies before
+    # reaching a terminal or illegal state — those drifts are unreliable.
+    # Set `pv_end_ep_loss_enabled = False` to disable the adjustment.
+    pv_end_ep_loss_enabled: bool = True
+    pv_end_min_pushed: int = 2
+    # Below this root ep_loss the pv_end lift is skipped: best / excellent /
+    # good plays (root ep_loss ≤ ep_good) should not be demoted just because
+    # their PV drifts a few centipawns further than the best candidate's PV.
+    # Chess.com's "good" label is assigned from the root eval without PV
+    # drift adjustment, so overriding via pv_end regresses the good bucket
+    # even more than it lifts mistake/blunder. Full-corpus A/B tests on this
+    # corpus showed ungated lift migrated ~1.1k excellent plays into good
+    # and a 0.02-gated lift regressed `good` by 8pp; gating at 0.05 preserves
+    # best / excellent / good while still surfacing hidden drift on moves the
+    # root eval already flags as inaccuracy-or-worse.
+    pv_end_min_ep_loss: float = 0.05
+    # The pv_end lift is applied only when the endpoint ep_loss exceeds the
+    # root ep_loss by at least this much. Small drifts (a few cp) are noise
+    # from the shallow endpoint search and should not re-bucket a move. The
+    # ML-vs-core signal came from plays whose pv_end revealed material
+    # collapses (hundreds of cp), so we require at least a half-bucket delta
+    # before overriding the root label. Without this guard a systematic
+    # ~2-5cp drift shifts chess.com's inaccuracy buckets down to mistake.
+    pv_end_min_lift: float = 0.05
+    # Rank-4+ plays get a separate targeted severity override below, but the
+    # generic PV-end replacement keeps the same conservative defaults as top-3.
+    pv_end_min_ep_loss_rank4: float = 0.05
+    pv_end_min_lift_rank4: float = 0.05
+
+    # --- Rank-4+ future-line severity override ---
+    # These exact-eval out-of-top-window plays are where core most often
+    # under-calls `good` / `inaccuracy` / `mistake`. Rather than lowering the
+    # global EP thresholds, use the played move's own PV endpoint to bump only
+    # the next severity bucket when the deeper line clearly collapses.
+    rank4_good_to_inaccuracy_min_future_ep: float = 0.065
+    rank4_good_to_inaccuracy_min_lift: float = 0.02
+    rank4_good_to_inaccuracy_min_draw_permille: int = 500
+    rank4_inaccuracy_to_mistake_min_future_ep: float = 0.11
+    rank4_inaccuracy_to_mistake_min_lift: float = 0.03
+

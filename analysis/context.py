@@ -23,6 +23,8 @@ from analysis.eco import ECOLookup
 from analysis.expected_points import (
     StockfishNativeWDLProvider,
     classify_ep_loss,
+    draw_sensitivity_factor,
+    pv_end_win_pct,
     resolve_provider,
 )
 from analysis.patterns import detect_tactics
@@ -146,9 +148,11 @@ class ContextAssembler:
         cp_loss = None
         played_move_san = None
         played_candidate = None
+        played_move_rank = None
         if played_move is not None:
             played_move_san = board.san(played_move)
             played_candidate = self._find_candidate(engine_result, played_move)
+            played_move_rank = self._candidate_rank(engine_result, played_move)
             played_cp = self._cp_for_move(engine_result, played_move)
             best_cp = best.score_cp if best.score_cp is not None else _mate_to_cp(best.mate_in)
             if played_cp is not None and best_cp is not None:
@@ -206,6 +210,80 @@ class ContextAssembler:
             else:
                 ep_loss_val = max(0.0, played_win_pct - best_win_pct)
 
+        # --- PV-end EP loss refinement (Theme 4) ---
+        # The root eval for a non-top candidate only looks one move deep at
+        # best; a shallow eval of +20cp can hide an 80cp collapse four plies
+        # later. When both the best and played candidates carry a `pv_end`
+        # re-eval (populated by the engine layer when `pv_end_nodes` is set),
+        # recompute a stricter EP loss. For top-1/2/3 moves we compare both
+        # PV endpoints, but for out-of-top-window plays (the searchmoves exact
+        # eval stored on `EngineResult.played_move`) the played move's own PV
+        # drift is the cleaner signal: use the root best eval against the
+        # played PV endpoint to avoid letting best-move drift dilute the lift.
+        is_rank4_plus = played_move_rank is not None and played_move_rank >= 4
+        rank4_future_ep_loss = None
+        rank4_future_lift = None
+        if (
+            self._config.pv_end_ep_loss_enabled
+            and played_candidate is not None
+            and ep_loss_val is not None
+        ):
+            played_wp_pv_end = pv_end_win_pct(
+                played_candidate, provider, player_elo, self._config
+            )
+            min_root_ep = (
+                self._config.pv_end_min_ep_loss_rank4
+                if is_rank4_plus
+                else self._config.pv_end_min_ep_loss
+            )
+            min_lift = (
+                self._config.pv_end_min_lift_rank4
+                if is_rank4_plus
+                else self._config.pv_end_min_lift
+            )
+            ep_loss_pv_end = None
+            if played_wp_pv_end is not None:
+                if is_rank4_plus:
+                    if board.turn == chess.WHITE:
+                        rank4_future_ep_loss = max(0.0, best_win_pct - played_wp_pv_end)
+                    else:
+                        rank4_future_ep_loss = max(0.0, played_wp_pv_end - best_win_pct)
+                    rank4_future_lift = rank4_future_ep_loss - ep_loss_val
+            if ep_loss_val > min_root_ep and played_wp_pv_end is not None:
+                if is_rank4_plus:
+                    ep_loss_pv_end = rank4_future_ep_loss
+                else:
+                    best_wp_pv_end = pv_end_win_pct(best, provider, player_elo, self._config)
+                    if best_wp_pv_end is not None:
+                        if board.turn == chess.WHITE:
+                            ep_loss_pv_end = max(0.0, best_wp_pv_end - played_wp_pv_end)
+                        else:
+                            ep_loss_pv_end = max(0.0, played_wp_pv_end - best_wp_pv_end)
+            # Only override when the endpoint reveals materially worse drift
+            # than the root eval. Small positive deltas (~5cp) are noise from
+            # the shallow endpoint search and should not re-bucket the move.
+            if (
+                ep_loss_pv_end is not None
+                and ep_loss_pv_end - ep_loss_val > min_lift
+            ):
+                ep_loss_val = max(ep_loss_val, ep_loss_pv_end)
+
+        # --- Draw-sensitivity boost (Theme 2) ---
+        # In structurally drawn positions (high `wdl_draw` on the best
+        # candidate) chess.com penalises the same EP loss more harshly than
+        # in decisive ones. The published EP thresholds are position-agnostic
+        # so we match chess.com's behaviour by scaling the *classification*
+        # EP loss in draw-heavy regimes before bucketing. The underlying
+        # `ep_loss` we store on the context remains the raw/refined value so
+        # special-move detectors and downstream analysis still operate on the
+        # true expected-score drop rather than the draw-context adjustment.
+        classification_ep_loss = ep_loss_val
+        if (
+            classification_ep_loss is not None
+            and classification_ep_loss > self._config.draw_boost_min_ep_loss
+        ):
+            classification_ep_loss *= draw_sensitivity_factor(best.wdl_draw, self._config)
+
         # --- Base classification ---
         # Step 1: classify by EP loss thresholds
         # At low Elo, tighten the "excellent" threshold — the sigmoid curve
@@ -218,7 +296,7 @@ class ContextAssembler:
                 self._config,
                 ep_excellent=self._config.ep_excellent_low_elo,
             )
-        label = classify_ep_loss(ep_loss_val, effective_config)
+        label = classify_ep_loss(classification_ep_loss, effective_config)
 
         # Step 2: if the played move is the engine's exact top choice AND
         # there's a meaningful gap to alternatives, promote to "best".
@@ -245,6 +323,31 @@ class ContextAssembler:
             )
             if in_gap_band and cp_loss_meaningful:
                 label = "excellent"
+
+        # Step 3: rank-4+ exact-eval severity override.
+        # These are the out-of-top-window plays where the shallow root eval most
+        # often underrates the eventual damage. Use the played move's PV-end only
+        # to bump one severity bucket, keeping the override narrow and product-
+        # focused on good/inaccuracy/mistake recall rather than broad relabeling.
+        if (
+            is_rank4_plus
+            and rank4_future_ep_loss is not None
+            and rank4_future_lift is not None
+        ):
+            if (
+                label == "good"
+                and best.wdl_draw is not None
+                and best.wdl_draw >= self._config.rank4_good_to_inaccuracy_min_draw_permille
+                and rank4_future_ep_loss >= self._config.rank4_good_to_inaccuracy_min_future_ep
+                and rank4_future_lift >= self._config.rank4_good_to_inaccuracy_min_lift
+            ):
+                label = "inaccuracy"
+            elif (
+                label == "inaccuracy"
+                and rank4_future_ep_loss >= self._config.rank4_inaccuracy_to_mistake_min_future_ep
+                and rank4_future_lift >= self._config.rank4_inaccuracy_to_mistake_min_lift
+            ):
+                label = "mistake"
 
         # --- Blunder concrete damage gate ---
         # Chess.com requires blunders to involve material loss or forced mate.
@@ -381,6 +484,19 @@ class ContextAssembler:
         for candidate in result.candidates:
             if candidate.move == move:
                 return candidate
+        if result.played_move is not None and result.played_move.move == move:
+            return result.played_move
+        return None
+
+    def _candidate_rank(self, result: EngineResult, move: chess.Move) -> Optional[int]:
+        """Return the played move's rank, or a lower bound for out-of-window evals."""
+        for idx, candidate in enumerate(result.candidates, start=1):
+            if candidate.move == move:
+                return idx
+        if result.played_move is not None and result.played_move.move == move:
+            # searchmoves exact evals are only populated when the move fell
+            # outside the multipv window, so treat them as rank-(N+1)+
+            return len(result.candidates) + 1
         return None
 
     def _cp_for_move(self, result: EngineResult, move: chess.Move) -> Optional[int]:
@@ -389,6 +505,10 @@ class ContextAssembler:
                 if candidate.score_cp is not None:
                     return candidate.score_cp
                 return _mate_to_cp(candidate.mate_in)
+        if result.played_move is not None and result.played_move.move == move:
+            if result.played_move.score_cp is not None:
+                return result.played_move.score_cp
+            return _mate_to_cp(result.played_move.mate_in)
         return None
 
     def _pv_to_san(self, board: chess.Board, pv: list[chess.Move]) -> list[str]:

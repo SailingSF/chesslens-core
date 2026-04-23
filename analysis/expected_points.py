@@ -138,3 +138,73 @@ def classify_ep_loss(ep_loss: Optional[float], config: Optional[ClassificationCo
     if ep_loss < c.ep_mistake:
         return "mistake"
     return "blunder"
+
+
+def draw_sensitivity_factor(
+    wdl_draw_permille: Optional[int],
+    config: Optional[ClassificationConfig] = None,
+) -> float:
+    """Multiplier applied to ep_loss in near-drawn positions.
+
+    Chess.com labels the same EP loss more harshly in structurally drawn
+    positions than in decisive ones — a 50cp slip is an "inaccuracy" when
+    a draw is on the line but merely "good" when you're already winning by
+    a piece. The chesslens-core EP thresholds are pinned to chess.com's
+    published table, so the draw-dependence is applied by scaling the
+    effective ep_loss up in draw-heavy positions before it is bucketed.
+
+    The factor ramps linearly from 1.0 at `draw_boost_min_permille` to
+    `draw_boost_max_factor` at the 1000‰ ceiling. Positions below the
+    threshold, or ones where no WDL is available, are unaffected.
+    """
+    c = config or ClassificationConfig()
+    if wdl_draw_permille is None or c.draw_boost_max_factor <= 1.0:
+        return 1.0
+    if wdl_draw_permille <= c.draw_boost_min_permille:
+        return 1.0
+    ramp_width = max(1, 1000 - c.draw_boost_min_permille)
+    ratio = min(1.0, (wdl_draw_permille - c.draw_boost_min_permille) / ramp_width)
+    return 1.0 + ratio * (c.draw_boost_max_factor - 1.0)
+
+
+def pv_end_win_pct(
+    candidate,
+    provider: WDLProvider,
+    elo: Optional[int] = None,
+    config: Optional[ClassificationConfig] = None,
+) -> Optional[float]:
+    """Convert a candidate's PV-endpoint eval to a white-POV win probability.
+
+    The endpoint is the position reached after pushing the candidate's PV
+    on a board copy and re-searching. Both the root eval and the PV-end
+    eval are stored in white-POV by the engine layer, so a straight
+    provider call is valid. Returns None when:
+
+      - `pv_end` is absent (the caller didn't request the re-eval),
+      - the PV resolved to fewer than `pv_end_min_pushed` plies (too
+        shallow to trust as a drift signal), or
+      - the PV reached a terminal state the provider can't score
+        (e.g. stalemate with mate_in=None and cp=0 would falsely read as
+        a draw even when one side is overwhelmingly winning — we let the
+        root eval handle those).
+
+    Terminal mates (`terminal=="checkmate"`) are honored via `mate_in`.
+    """
+    c = config or ClassificationConfig()
+    pv_end = getattr(candidate, "pv_end", None)
+    if pv_end is None:
+        return None
+    if pv_end.pushed < c.pv_end_min_pushed:
+        return None
+    if pv_end.terminal is not None:
+        # Synthesized terminal evals are degraded: stalemate/draw carry
+        # `cp=0` which mis-represents drawn-but-winning positions, and
+        # checkmate carries `mate_in=0` which has lost the who-mated-whom
+        # sign. The root eval already assigns a decisive score in these
+        # cases, so we defer to it rather than guessing parity here.
+        return None
+    return provider.get_win_pct(
+        cp=pv_end.score_cp,
+        mate_in=pv_end.mate_in,
+        elo=elo,
+    )
