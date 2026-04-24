@@ -106,12 +106,16 @@ class TestSigmoidProvider:
         assert wp_2200 > wp_800
 
     def test_elo_scaling_factor_values(self):
-        """Check scaling factor at representative Elo values for current config."""
+        """Check scaling factor at representative Elo values for current config.
+
+        Defaults: floor=0.85, range=0.6, steep=0.008, midpoint=1500.
+        factor(elo) = 0.85 + 0.6 * sigmoid(0.008 * (elo - 1500))
+        """
         provider = SigmoidWDLProvider()
-        assert provider._elo_scaling_factor(800) == pytest.approx(0.802, abs=0.02)
-        assert provider._elo_scaling_factor(1500) == pytest.approx(0.854, abs=0.02)
-        assert provider._elo_scaling_factor(2200) == pytest.approx(0.985, abs=0.02)
-        assert provider._elo_scaling_factor(2800) == pytest.approx(0.999, abs=0.01)
+        assert provider._elo_scaling_factor(800) == pytest.approx(0.852, abs=0.01)
+        assert provider._elo_scaling_factor(1500) == pytest.approx(1.150, abs=0.01)
+        assert provider._elo_scaling_factor(2200) == pytest.approx(1.448, abs=0.01)
+        assert provider._elo_scaling_factor(2800) == pytest.approx(1.450, abs=0.01)
 
     def test_no_elo_uses_base_curve(self):
         """Without Elo, scaling factor should be 1.0 (base curve)."""
@@ -256,10 +260,11 @@ class TestEPContextAware:
         wp_800 = provider.get_win_pct(cp=150, elo=800)
         wp_2200 = provider.get_win_pct(cp=150, elo=2200)
         assert wp_2200 > wp_800
-        # With optimized narrow range, both are in the 0.58-0.65 range
-        # but higher Elo still converts better
+        # Theme-5 tuned range (0.6) spreads the conversion substantially:
+        # factor(800)≈0.85 → +150cp reads as a modest edge, factor(2200)≈1.45
+        # → same cp reads as clearly winning.
         assert 0.55 < wp_800 < 0.65
-        assert 0.58 < wp_2200 < 0.68
+        assert 0.65 < wp_2200 < 0.75
 
 
 # ===========================================================================

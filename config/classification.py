@@ -22,13 +22,24 @@ class ClassificationConfig:
     k_base: float = 0.00368
 
     # Elo scaling curve: scaling_factor = floor + range * sigmoid(steepness * (elo - midpoint))
-    # Optimized against the larger external review corpus
-    # (760 games / ~45k comparable moves) using per-side Elos and SF16.1
-    # node-based multi-PV caches.
+    #
+    # Chess.com applies Elo-dependent harshness: the same EP loss earns different
+    # labels at different ratings. At 40cp loss in a draw-heavy position the
+    # classification shifts from 76% "good" at sub-1000 ratings to 63%
+    # "inaccuracy" at 1900+. To reproduce that behaviour we scale the sigmoid
+    # steepness (k = k_base * scaling_factor), which amplifies ep_loss at high
+    # Elo and compresses it at low Elo.
+    #
+    # Tuning (Theme 5, 796-game review corpus, ~46k comparable moves):
+    #   baseline (floor=0.85, range=0.2, steep=0.003, midpoint=850)  → 70.67%
+    #   tuned   (floor=0.85, range=0.6, steep=0.008, midpoint=1500)  → 72.72%
+    # +2.05pp overall, +4.7pp at Elo≥1900, +6.2pp inaccuracy recall, +6.0pp
+    # mistake recall; low-Elo buckets preserved (≤0.1pp drift). Floor stays at
+    # 0.85 — any lower value crashed low-Elo accuracy sharply in the sweep.
     elo_scale_floor: float = 0.85
-    elo_scale_range: float = 0.2
-    elo_scale_steepness: float = 0.003
-    elo_scale_midpoint: float = 850.0
+    elo_scale_range: float = 0.6
+    elo_scale_steepness: float = 0.008
+    elo_scale_midpoint: float = 1500.0
 
     # --- EP thresholds — pinned to chess.com's published table ---
     # https://support.chess.com/en/articles/8572705-how-are-moves-classified
