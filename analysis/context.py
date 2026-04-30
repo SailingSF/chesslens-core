@@ -29,7 +29,13 @@ from analysis.expected_points import (
 )
 from analysis.patterns import detect_tactics
 from analysis.pawns import analyze_pawns
-from analysis.special_moves import detect_brilliant, detect_great, detect_miss, is_concrete_blunder
+from analysis.special_moves import (
+    detect_brilliant,
+    detect_great,
+    detect_miss,
+    is_concrete_blunder,
+    is_multi_ply_material_blunder,
+)
 from chess_engine.service import CandidateMove, EngineResult
 from config.classification import ClassificationConfig
 
@@ -365,6 +371,42 @@ class ContextAssembler:
                 config=self._config,
             ):
                 label = "mistake"
+
+        # --- Multi-ply material blunder promotion ---
+        # The 1-ply concrete-blunder gate above can leave a "mistake" or
+        # "inaccuracy" label on plays whose material collapse only manifests
+        # 3–4 plies into the engine's best continuation. Audit harness fires
+        # in 152 such positions (precision 0.68 vs 0.26 base) — promote them.
+        if (
+            label in ("mistake", "inaccuracy")
+            and played_move is not None
+            and played_candidate is not None
+            and ep_loss_val is not None
+            and ep_loss_val >= self._config.multi_ply_material_blunder_min_ep
+            and is_multi_ply_material_blunder(
+                board,
+                best,
+                played_candidate,
+                played_move,
+                board.turn,
+                config=self._config,
+            )
+        ):
+            label = "blunder"
+
+        # --- High-Elo good→inaccuracy boundary tightening ---
+        # Theme 5's elo_scale_* sigmoid amplifies EP loss at high Elo but the
+        # boundary between good (≤0.05) and inaccuracy (>0.05) still leaks at
+        # 2100+. Audit shows 546 positions where Elo≥2100 + EP≥0.035 are
+        # labelled "good" by core but "inaccuracy" by chess.com. Tighten.
+        if (
+            label == "good"
+            and player_elo is not None
+            and player_elo >= self._config.elo_high_good_inaccuracy_threshold
+            and classification_ep_loss is not None
+            and classification_ep_loss >= self._config.elo_high_good_inaccuracy_min_ep
+        ):
+            label = "inaccuracy"
 
         # --- Special classification checks ---
         is_brilliant = False
