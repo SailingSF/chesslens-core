@@ -546,6 +546,67 @@ def _best_move_wins_material(
     return False
 
 
+def _pv_relative_material_delta(
+    board: chess.Board,
+    pv: list[chess.Move],
+    side: chess.Color,
+    depth: int,
+) -> int:
+    """Signed change in (us - them) material after walking up to `depth` plies of `pv`.
+
+    Positive = side gains material; negative = side loses material. Returns 0 if
+    the PV cannot be played (illegal moves, terminal state).
+    """
+    initial = _material_balance(board, side) - _material_balance(board, not side)
+    temp = board.copy()
+    final = initial
+    for move in pv[:depth]:
+        try:
+            temp.push(move)
+        except Exception:
+            break
+        final = _material_balance(temp, side) - _material_balance(temp, not side)
+    return final - initial
+
+
+def is_multi_ply_material_blunder(
+    board_before: chess.Board,
+    best_candidate: Optional[CandidateMove],
+    played_candidate: Optional[CandidateMove],
+    played_move: chess.Move,
+    side: chess.Color,
+    config: Optional[ClassificationConfig] = None,
+) -> bool:
+    """
+    Concrete-blunder promotion: the played move walks into a multi-ply material
+    collapse that the best line avoids. Fires when the played PV ends at least
+    `min_material_gain` pawn units down on net material AND the best PV is at
+    least `min_material_gain` better than the played PV over `depth` half-moves.
+
+    The 1-ply concrete blunder gate misses these because the immediate exchange
+    on the played move looks even — the loss only crystallises over the next
+    3–4 plies of the opponent's best continuation. Used to promote a
+    mistake/inaccuracy label to blunder.
+    """
+    if best_candidate is None or played_candidate is None:
+        return False
+    c = config or ClassificationConfig()
+    depth = c.multi_ply_material_blunder_depth
+    min_gap = c.multi_ply_material_blunder_min_material_gain
+
+    best_pv = list(best_candidate.pv) if best_candidate.pv else []
+    if not best_pv:
+        return False
+    best_delta = _pv_relative_material_delta(board_before, best_pv, side, depth)
+
+    played_pv = list(played_candidate.pv) if played_candidate.pv else []
+    if not played_pv or played_pv[0] != played_move:
+        played_pv = [played_move] + played_pv
+    played_delta = _pv_relative_material_delta(board_before, played_pv, side, depth)
+
+    return played_delta <= -min_gap and (best_delta - played_delta) >= min_gap
+
+
 def _has_concrete_opportunity(
     best_candidate: Optional[CandidateMove],
     board_before: Optional[chess.Board],

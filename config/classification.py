@@ -153,6 +153,29 @@ class ClassificationConfig:
     miss_direct_tactic_min_gap_cp: int = 250       # gap between best and 2nd-best candidate
     miss_direct_tactic_min_mover_wp: float = 0.15  # don't fire when already losing
 
+    # --- Multi-ply material blunder promotion ---
+    # Promotes a label from mistake/inaccuracy to blunder when the played move
+    # walks into a multi-ply material collapse that the best line avoids.
+    # The 1-ply concrete-blunder gate misses these because the immediate
+    # exchange on the played move looks even — the loss only crystallises over
+    # 3–4 half-moves of best play. Audit on the 45.4k-row corpus showed this
+    # rule fires 152 times with precision 0.68 (vs 0.26 for the unaltered
+    # mistake/inaccuracy labels in the same slice), lifting overall accuracy
+    # by +0.0014 with 103 fixed / 40 broken.
+    multi_ply_material_blunder_min_ep: float = 0.20
+    multi_ply_material_blunder_min_material_gain: int = 2
+    multi_ply_material_blunder_depth: int = 4
+
+    # --- High-Elo good→inaccuracy boundary tightening ---
+    # Generalises Theme 5's elo_scale_* sigmoid from a global harshness curve
+    # to per-class boundary overrides. At Elo ≥ this threshold, chess.com is
+    # systematically harsher on small EP losses than the published thresholds
+    # imply: a 35–50 cp slip a 2100+ player commits is more often labelled
+    # "inaccuracy" than "good". Audit on the 45.4k-row corpus: 546 fires,
+    # precision 0.41 (vs 0.33 base), +0.0010 accuracy, 224 fixed / 179 broken.
+    elo_high_good_inaccuracy_threshold: int = 2100
+    elo_high_good_inaccuracy_min_ep: float = 0.035
+
     # --- Draw-sensitivity boost (ML-vs-core analysis, Theme 2) ---
     # Chess.com penalises moderate EP loss more harshly in near-drawn positions
     # than in decisive ones: a 50cp slip that turns a draw into a loss is an

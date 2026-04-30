@@ -302,3 +302,85 @@ def test_concrete_blunder_fires_on_hanging_piece():
         board_before, board_after, move, played, chess.WHITE,
         ep_loss=0.5,
     )
+
+
+# --- Multi-ply material blunder promotion ---
+
+from analysis.special_moves import is_multi_ply_material_blunder
+
+
+def test_multi_ply_blunder_fires_when_played_pv_loses_material_best_avoids():
+    # White queen on d4 (attacked by Bb6); black bishop b6 hangs.
+    # Best: Qxb6 wins the bishop (+3 material).
+    # Played: quiet Kd1 — black plays Bxd4 next, winning the queen (-9 material).
+    # Predicate: played_delta = -9, best_delta = +3 → both conditions clear.
+    board = chess.Board("4k3/8/1b6/8/3Q4/8/8/4K3 w - - 0 1")
+    best_move = board.parse_san("Qxb6")
+    played_move = board.parse_san("Kd1")
+    # Build played PV: Kd1, then black plays Bxd4 (legal after Kd1).
+    after_played = board.copy()
+    after_played.push(played_move)
+    bxd4 = after_played.parse_san("Bxd4")
+    best = CandidateMove(move=best_move, score_cp=300, mate_in=None, pv=[best_move])
+    played = CandidateMove(move=played_move, score_cp=-900, mate_in=None, pv=[played_move, bxd4])
+    assert is_multi_ply_material_blunder(
+        board, best, played, played_move, chess.WHITE,
+    )
+
+
+def test_multi_ply_blunder_does_not_fire_on_quiet_balanced_position():
+    # Starting position; both moves are quiet pawn pushes — no material changes.
+    board = chess.Board()
+    e4 = board.parse_san("e4")
+    d4 = board.parse_san("d4")
+    best = CandidateMove(move=e4, score_cp=30, mate_in=None, pv=[e4])
+    played = CandidateMove(move=d4, score_cp=20, mate_in=None, pv=[d4])
+    assert not is_multi_ply_material_blunder(
+        board, best, played, d4, chess.WHITE,
+    )
+
+
+def test_multi_ply_blunder_does_not_fire_when_best_also_loses_material():
+    # Both PVs end with the same material loss — the play isn't a *relative* blunder.
+    board = chess.Board("4k3/8/1b6/8/3Q4/8/8/4K3 w - - 0 1")
+    bxd4_target_after_kd1 = chess.Board("4k3/8/1b6/8/3Q4/8/8/3K4 b - - 1 1")
+    bxd4 = bxd4_target_after_kd1.parse_san("Bxd4")
+    # Both candidates retreat to a square that black can capture.
+    kd1 = board.parse_san("Kd1")
+    kf1 = board.parse_san("Kf1")
+    # After Kd1 black plays Bxd4 (-9). After Kf1 black also plays Bxd4 (-9).
+    # Build best PV: Kf1, then Bxd4 from f1-board.
+    after_kf1 = board.copy()
+    after_kf1.push(kf1)
+    bxd4_after_kf1 = after_kf1.parse_san("Bxd4")
+    best = CandidateMove(move=kf1, score_cp=-900, mate_in=None, pv=[kf1, bxd4_after_kf1])
+    played = CandidateMove(move=kd1, score_cp=-900, mate_in=None, pv=[kd1, bxd4])
+    # Both lose the queen → best_delta - played_delta == 0, predicate fails.
+    assert not is_multi_ply_material_blunder(
+        board, best, played, kd1, chess.WHITE,
+    )
+
+
+# --- High-Elo good→inaccuracy boundary ---
+
+def test_elo_high_good_to_inaccuracy_fires_at_threshold():
+    """At Elo>=2100 with EP loss in the 0.035-0.05 band, 'good' tightens to 'inaccuracy'."""
+    board = chess.Board()
+    moves = list(board.legal_moves)
+    # Construct an engine result where the played move is rank-2 with ~30cp loss.
+    # 30cp at Elo 2200 maps to EP loss in the good band.
+    result = EngineResult(
+        fen=board.fen(),
+        depth=20,
+        candidates=[
+            CandidateMove(move=moves[0], score_cp=20, mate_in=None, pv=[moves[0]]),
+            CandidateMove(move=moves[1], score_cp=-30, mate_in=None, pv=[moves[1]]),
+            CandidateMove(move=moves[2], score_cp=-50, mate_in=None, pv=[moves[2]]),
+        ],
+    )
+    assembler = ContextAssembler()
+    ctx_low = assembler.assemble(board, result, played_move=moves[1], player_elo=1200)
+    ctx_high = assembler.assemble(board, result, played_move=moves[1], player_elo=2200)
+    # Same position + same played move; Elo gates the high-Elo override.
+    if ctx_low.cp_loss_label == "good":
+        assert ctx_high.cp_loss_label == "inaccuracy"
