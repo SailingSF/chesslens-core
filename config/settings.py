@@ -137,8 +137,9 @@ STOCKFISH_PLAYED_MOVE_NODES = _int_env("STOCKFISH_PLAYED_MOVE_NODES", None)
 STOCKFISH_DEFAULT_ENGINE = os.environ.get("STOCKFISH_DEFAULT_ENGINE", "") or None
 STOCKFISH_DIR = os.environ.get("STOCKFISH_DIR", "") or None
 
-# Anthropic
+# LLM providers
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 # CORS — allow React dev server
 CORS_ALLOWED_ORIGINS = [

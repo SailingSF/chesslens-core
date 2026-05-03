@@ -28,6 +28,7 @@ from analysis.eco import ECOLookup
 from analysis.priority import PriorityResult, PriorityTier, classify
 from chess_engine.service import CandidateMove, EngineService
 from explanation.generator import ExplanationGenerator, SkillLevel
+from explanation.providers import LLMConfig
 from explanation.templates.game_review import (
     build_game_review_system_prompt,
     build_move_user_message,
@@ -75,6 +76,8 @@ class GameAnalyzer:
         player_color: str = "white",
         analysis_depth: int = 16,
         multipv: int = 3,
+        llm_config: LLMConfig | None = None,
+        # Legacy param kept for backwards compatibility
         api_key: str | None = None,
         player_elo: int | None = None,
         opponent_elo: int | None = None,
@@ -100,10 +103,15 @@ class GameAnalyzer:
         board = game.board()
         followup_depth = max(analysis_depth - 4, 10)
 
+        # Resolve effective LLM config (llm_config wins; fall back to legacy api_key)
+        from explanation.providers import LLMConfig as _LLMConfig
+        effective_llm = llm_config or (_LLMConfig(api_key=api_key) if api_key else _LLMConfig())
+
         # Narrative conversation state — stored on instance so the view
         # can call generate_summary() after iteration completes.
         self._system_prompt = build_game_review_system_prompt(player_color, skill_level)
         self._conversation: list[dict] = []
+        self._llm_config = effective_llm
         # Track how many consecutive player moves went without LLM analysis
         player_moves_without_analysis = 0
         prev_context: AssembledContext | None = None
@@ -166,7 +174,8 @@ class GameAnalyzer:
             if needs_explanation:
                 explanation = await self._explainer.generate_narrative(
                     context, priority, full_move_number, color,
-                    self._conversation, self._system_prompt, api_key=api_key,
+                    self._conversation, self._system_prompt,
+                    llm_config=self._llm_config,
                 )
                 if is_player_move:
                     player_moves_without_analysis = 0
@@ -193,10 +202,19 @@ class GameAnalyzer:
                 explanation=explanation,
             )
 
-    async def generate_summary(self, api_key: str | None = None) -> str:
+    async def generate_summary(
+        self,
+        llm_config: LLMConfig | None = None,
+        # Legacy param
+        api_key: str | None = None,
+    ) -> str:
         """Generate a final game summary. Call after analyze_pgn iteration completes."""
+        cfg = llm_config or getattr(self, "_llm_config", None)
+        if cfg is None and api_key:
+            from explanation.providers import LLMConfig as _LLMConfig
+            cfg = _LLMConfig(api_key=api_key)
         return await self._explainer.generate_game_summary(
-            self._conversation, self._system_prompt, api_key=api_key,
+            self._conversation, self._system_prompt, llm_config=cfg,
         )
 
     @staticmethod
