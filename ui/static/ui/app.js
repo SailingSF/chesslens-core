@@ -4,8 +4,8 @@
  * LLM settings are stored in localStorage:
  *   chesslens_llm_provider  — "anthropic" (default) or "openai"
  *   chesslens_llm_model     — model name; falls back to provider default
- *   chesslens_api_key       — Anthropic API key override
- *   chesslens_openai_key    — OpenAI API key override
+ *   anthropic_api_key       — Anthropic API key override
+ *   openai_api_key          — OpenAI API key override
  */
 
 window.ChessLens = {
@@ -42,7 +42,7 @@ window.ChessLens = {
     getApiKey(provider) {
         provider = provider || this.getLLMProvider();
         return localStorage.getItem(
-            provider === 'openai' ? 'chesslens_openai_key' : 'chesslens_api_key'
+            provider === 'openai' ? 'openai_api_key' : 'anthropic_api_key'
         ) || '';
     },
 

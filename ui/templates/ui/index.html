@@ -148,7 +148,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (model) localStorage.setItem('chesslens_llm_model', model);
 
         if (key) {
-            const storageKey = provider === 'openai' ? 'chesslens_openai_key' : 'chesslens_api_key';
+            const storageKey = provider === 'openai' ? 'openai_api_key' : 'anthropic_api_key';
             localStorage.setItem(storageKey, key);
             keyInput.value = '';
         }
