@@ -1,19 +1,64 @@
 /*
  * ChessLens UI — shared utilities.
  *
- * API key is stored in localStorage under 'chesslens_api_key'.
- * All fetch calls in page-specific scripts should include the key header.
+ * LLM settings are stored in localStorage:
+ *   chesslens_llm_provider  — "anthropic" (default) or "openai"
+ *   chesslens_llm_model     — model name; falls back to provider default
+ *   chesslens_api_key       — Anthropic API key override
+ *   chesslens_openai_key    — OpenAI API key override
  */
 
 window.ChessLens = {
-    getApiKey() {
-        return localStorage.getItem('chesslens_api_key') || '';
+
+    // Model lists shown in the provider selector on the home page.
+    MODELS: {
+        anthropic: [
+            { value: 'claude-sonnet-4-6',        label: 'Claude Sonnet 4.6' },
+            { value: 'claude-opus-4-7',           label: 'Claude Opus 4.7' },
+            { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
+        ],
+        openai: [
+            { value: 'gpt-5.5',     label: 'GPT-5.5 (reasoning)' },
+            { value: 'gpt-4.1',     label: 'GPT-4.1' },
+            { value: 'gpt-4.1-mini',label: 'GPT-4.1 Mini' },
+            { value: 'gpt-4o',      label: 'GPT-4o' },
+            { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
+            { value: 'o3',          label: 'o3 (reasoning)' },
+            { value: 'o4-mini',     label: 'o4-mini (reasoning)' },
+        ],
+    },
+
+    DEFAULT_MODELS: { anthropic: 'claude-sonnet-4-6', openai: 'gpt-5.5' },
+
+    getLLMProvider() {
+        return localStorage.getItem('chesslens_llm_provider') || 'anthropic';
+    },
+
+    getLLMModel() {
+        return localStorage.getItem('chesslens_llm_model') || '';
+    },
+
+    // Return the stored API key for the given (or currently selected) provider.
+    getApiKey(provider) {
+        provider = provider || this.getLLMProvider();
+        return localStorage.getItem(
+            provider === 'openai' ? 'chesslens_openai_key' : 'chesslens_api_key'
+        ) || '';
     },
 
     apiHeaders(extra) {
-        const headers = {'Content-Type': 'application/json', ...extra};
-        const key = this.getApiKey();
-        if (key) headers['X-Anthropic-Key'] = key;
+        const headers = { 'Content-Type': 'application/json', ...extra };
+        const provider = this.getLLMProvider();
+        const model    = this.getLLMModel();
+
+        headers['X-LLM-Provider'] = provider;
+        if (model) headers['X-LLM-Model'] = model;
+
+        const key = this.getApiKey(provider);
+        if (key) {
+            headers[provider === 'openai' ? 'X-OpenAI-Key' : 'X-Anthropic-Key'] = key;
+        }
+
         return headers;
     },
 
