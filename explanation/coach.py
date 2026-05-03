@@ -7,7 +7,7 @@ Rules enforced at the prompt level:
   - NEVER suggests or hints at a specific move
   - Returns a single sentence
 
-Uses AsyncAnthropic to avoid blocking the event loop.
+Supports Anthropic and OpenAI providers via LLMConfig.
 """
 
 from __future__ import annotations
@@ -17,11 +17,13 @@ import re
 from typing import Literal, Optional
 
 import anthropic
+import openai
 from anthropic._exceptions import OverloadedError
 from django.conf import settings
 
 from analysis.context import AssembledContext
 from analysis.priority import PriorityResult
+from explanation.providers import DEFAULT_ANTHROPIC_MODEL, LLMConfig
 from explanation.retry import retry_overloaded
 from explanation.templates.coach_nudge import build_coach_nudge_prompt
 
@@ -42,34 +44,46 @@ _MOVE_NOTATION_RE = re.compile(
 
 
 class CoachNudgeGenerator:
-    def __init__(self, client: anthropic.AsyncAnthropic | None = None):
-        self._client = client or anthropic.AsyncAnthropic(
+    def __init__(
+        self,
+        anthropic_client: anthropic.AsyncAnthropic | None = None,
+    ):
+        self._anthropic_default = anthropic_client or anthropic.AsyncAnthropic(
             api_key=settings.ANTHROPIC_API_KEY,
         )
-        self._per_key_clients: dict[str, anthropic.AsyncAnthropic] = {}
+        self._anthropic_clients: dict[str, anthropic.AsyncAnthropic] = {}
+        self._openai_clients: dict[str, openai.AsyncOpenAI] = {}
 
-    def _get_client(self, api_key: str | None = None) -> anthropic.AsyncAnthropic:
-        """Return a cached client for the given key, or the default client."""
+    # ------------------------------------------------------------------
+    # Client helpers
+    # ------------------------------------------------------------------
+
+    def _get_anthropic_client(self, api_key: str | None) -> anthropic.AsyncAnthropic:
         if not api_key:
-            return self._client
-        if api_key not in self._per_key_clients:
-            self._per_key_clients[api_key] = anthropic.AsyncAnthropic(
-                api_key=api_key,
-            )
-        return self._per_key_clients[api_key]
+            return self._anthropic_default
+        if api_key not in self._anthropic_clients:
+            self._anthropic_clients[api_key] = anthropic.AsyncAnthropic(api_key=api_key)
+        return self._anthropic_clients[api_key]
 
-    async def generate(
+    def _get_openai_client(self, api_key: str | None) -> openai.AsyncOpenAI:
+        key = api_key or getattr(settings, "OPENAI_API_KEY", "")
+        if key not in self._openai_clients:
+            self._openai_clients[key] = openai.AsyncOpenAI(api_key=key)
+        return self._openai_clients[key]
+
+    # ------------------------------------------------------------------
+    # Low-level call helpers
+    # ------------------------------------------------------------------
+
+    async def _call_anthropic(
         self,
-        context: AssembledContext,
-        priority: PriorityResult,
-        skill_level: SkillLevel = "intermediate",
+        prompt: str,
         *,
-        model: str = "claude-sonnet-4-6",
-        max_tokens: int = 128,
-        api_key: str | None = None,
+        model: str,
+        max_tokens: int,
+        api_key: str | None,
     ) -> str:
-        prompt = build_coach_nudge_prompt(context, priority, skill_level)
-        client = self._get_client(api_key)
+        client = self._get_anthropic_client(api_key)
         try:
             message = await retry_overloaded(
                 lambda: client.messages.create(
@@ -78,11 +92,75 @@ class CoachNudgeGenerator:
                     messages=[{"role": "user", "content": prompt}],
                 )
             )
+            return message.content[0].text.strip()
         except OverloadedError:
             logger.warning("Anthropic API overloaded after all retries, skipping coach nudge")
             return ""
-        text = message.content[0].text.strip()
-        self._validate_no_move_notation(text)
+
+    async def _call_openai(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        max_tokens: int,
+        api_key: str | None,
+        reasoning_effort: str | None,
+    ) -> str:
+        client = self._get_openai_client(api_key)
+        kwargs: dict = dict(
+            model=model,
+            input=prompt,
+            max_output_tokens=max_tokens,
+        )
+        if reasoning_effort:
+            kwargs["reasoning"] = {"effort": reasoning_effort}
+        try:
+            response = await client.responses.create(**kwargs)
+            return response.output_text.strip()
+        except openai.RateLimitError:
+            logger.warning("OpenAI rate limit hit, skipping coach nudge")
+            return ""
+        except openai.APIStatusError as exc:
+            logger.warning("OpenAI API error %s, skipping coach nudge", exc.status_code)
+            return ""
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def generate(
+        self,
+        context: AssembledContext,
+        priority: PriorityResult,
+        skill_level: SkillLevel = "intermediate",
+        *,
+        llm_config: LLMConfig | None = None,
+        # Legacy params
+        model: str = DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: int = 128,
+        api_key: str | None = None,
+    ) -> str:
+        cfg = llm_config or LLMConfig(model=model, api_key=api_key)
+        prompt = build_coach_nudge_prompt(context, priority, skill_level)
+
+        if cfg.is_openai:
+            text = await self._call_openai(
+                prompt,
+                model=cfg.model,
+                max_tokens=max_tokens,
+                api_key=cfg.api_key,
+                reasoning_effort=cfg.reasoning_effort,
+            )
+        else:
+            text = await self._call_anthropic(
+                prompt,
+                model=cfg.model,
+                max_tokens=max_tokens,
+                api_key=cfg.api_key,
+            )
+
+        if text:
+            self._validate_no_move_notation(text)
         return text
 
     def _validate_no_move_notation(self, text: str) -> None:

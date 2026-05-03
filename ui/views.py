@@ -1,8 +1,13 @@
+from django.conf import settings
 from django.shortcuts import render
 
 
 def index(request):
-    return render(request, "ui/index.html", {"active_page": "home"})
+    return render(request, "ui/index.html", {
+        "active_page": "home",
+        "has_anthropic_key": bool(getattr(settings, "ANTHROPIC_API_KEY", "")),
+        "has_openai_key": bool(getattr(settings, "OPENAI_API_KEY", "")),
+    })
 
 
 def game_review(request):

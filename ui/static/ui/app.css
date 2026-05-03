@@ -501,30 +501,55 @@ a:hover { color: var(--amber-hot); }
     color: var(--amber);
 }
 
-/* API key card */
+/* LLM config card (home page) */
 .key-saved {
     display: inline-flex; align-items: center; gap: 6px;
     font-family: var(--font-mono);
     font-size: 11px;
     color: #7dd9a0;
-    margin-top: 8px;
+    margin-top: 10px;
 }
-.api-key-card { margin-bottom: 24px; max-width: 540px; }
-.api-key-card h2 {
+.llm-config-card { margin-bottom: 24px; max-width: 560px; }
+.llm-config-card h2 {
     font-size: 13.5px;
     font-family: var(--font-sans);
     font-weight: 600;
     color: var(--paper-dim);
     margin: 0 0 6px;
 }
-.api-key-card p {
+.llm-config-card p {
     font-size: 14px;
     color: var(--paper-dim);
     line-height: 1.6;
-    margin: 0 0 12px;
+    margin: 0 0 14px;
+}
+.llm-selector-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+.llm-key-label-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 6px;
+}
+.server-key-badge {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: #7dd9a0;
+    background: rgba(30, 132, 73, .15);
+    border: 1px solid rgba(30, 132, 73, .28);
+    border-radius: 2px;
+    padding: 1px 6px;
 }
 .api-key-row { display: flex; gap: 8px; }
 .api-key-row .app-input { flex: 1; }
+
+@media (max-width: 480px) {
+    .llm-selector-row { grid-template-columns: 1fr; }
+}
 
 /* Promo */
 .promo-card {

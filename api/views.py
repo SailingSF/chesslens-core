@@ -29,6 +29,7 @@ from api.serializers import (
 )
 from chess_engine.service import get_engine_service
 from explanation.generator import get_explainer
+from explanation.providers import make_llm_config
 from game.analyzer import GameAnalyzer
 from game.session import GameSession, SessionManager
 
@@ -48,6 +49,30 @@ def _engine_defaults():
 
 # Shared assembler instance (stateless, safe to reuse)
 _assembler = ContextAssembler()
+
+
+def _build_llm_config(request, data: dict):
+    """Resolve LLMConfig from request headers (middleware) + body fields.
+
+    Body fields take precedence over headers so that per-request overrides
+    from programmatic API callers work without modifying headers.
+    """
+    provider = data.get("llm_provider") or getattr(request, "llm_provider", None)
+    model = data.get("llm_model") or getattr(request, "llm_model", None)
+    reasoning = data.get("llm_reasoning_effort") or getattr(request, "llm_reasoning_effort", None)
+
+    # Pick the correct API key based on the resolved provider
+    if provider == "openai" or (model and not model.startswith("claude-")):
+        api_key = getattr(request, "openai_api_key", None)
+    else:
+        api_key = getattr(request, "anthropic_api_key", None)
+
+    return make_llm_config(
+        provider=provider,
+        model=model or None,
+        api_key=api_key,
+        reasoning_effort=reasoning or None,
+    )
 
 
 def _parse_json_body(request):
@@ -109,7 +134,7 @@ async def game_review(request):
     player_color = data.get("player_color", "white")
     engine_id = data.get("engine_id") or None
 
-    api_key = getattr(request, "anthropic_api_key", None)
+    llm_config = _build_llm_config(request, data)
     engine = get_engine_service()
     explainer = get_explainer()
     analyzer = GameAnalyzer(
@@ -122,9 +147,9 @@ async def game_review(request):
             pgn_text,
             skill_level=skill_level,
             player_color=player_color,
-            api_key=api_key,
+            llm_config=llm_config,
         ):
-            data = {
+            payload = {
                 "move_number": move_analysis.move_number,
                 "color": move_analysis.color,
                 "move_san": move_analysis.context.played_move_san,
@@ -136,10 +161,10 @@ async def game_review(request):
                 "priority_tier": move_analysis.priority.tier.value,
                 "explanation": move_analysis.explanation,
             }
-            yield f"data: {json.dumps(data)}\n\n"
+            yield f"data: {json.dumps(payload)}\n\n"
 
         # Generate and send the final game summary
-        summary = await analyzer.generate_summary(api_key=api_key)
+        summary = await analyzer.generate_summary(llm_config=llm_config)
         yield f'data: {json.dumps({"done": True, "summary": summary})}\n\n'
 
     return StreamingHttpResponse(event_stream(), content_type="text/event-stream")
@@ -198,9 +223,9 @@ async def position_explorer(request):
             "pv": pv_san,
         })
 
-    api_key = getattr(request, "anthropic_api_key", None)
+    llm_config = _build_llm_config(request, data)
     explainer = get_explainer()
-    explanation = await explainer.generate(context, priority, skill_level, api_key=api_key)
+    explanation = await explainer.generate(context, priority, skill_level, llm_config=llm_config)
 
     return JsonResponse({
         "explanation": explanation,

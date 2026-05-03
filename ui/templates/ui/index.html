@@ -4,22 +4,44 @@
 {% block content %}
 <span class="app-eyebrow">chesslens-core · local instance</span>
 <h1 class="app-page-title">Open-source chess analysis.<br><em>Running locally.</em></h1>
-<p class="app-page-sub">Stockfish evaluation + move classification + Claude AI narration — on your machine. No cloud required.</p>
+<p class="app-page-sub">Stockfish evaluation + move classification + AI narration — on your machine. No cloud required.</p>
 
-<section class="app-card api-key-card">
-    <h2>Anthropic API Key</h2>
-    <p>Used for AI move narration. Stored only in your browser, sent directly to the local server.</p>
+<section class="app-card llm-config-card">
+    <h2>AI Provider</h2>
+    <p>Choose the language model for move narration. Your key is stored only in your browser and sent directly to the local server.</p>
+
+    <div class="llm-selector-row">
+        <div>
+            <label class="app-label" for="llm-provider-select">Provider</label>
+            <select class="app-select" id="llm-provider-select">
+                <option value="anthropic">Anthropic</option>
+                <option value="openai">OpenAI</option>
+            </select>
+        </div>
+        <div>
+            <label class="app-label" for="llm-model-select">Model</label>
+            <select class="app-select" id="llm-model-select">
+                <!-- populated by JS -->
+            </select>
+        </div>
+    </div>
+
+    <div class="llm-key-label-row">
+        <label class="app-label" for="api-key-input">API Key</label>
+        <span id="server-key-badge" class="server-key-badge" hidden>server key active</span>
+    </div>
     <div class="api-key-row">
         <input type="password" class="app-input" id="api-key-input"
                placeholder="sk-ant-api03-..."
-               aria-label="Anthropic API Key">
+               aria-label="API Key">
         <button type="button" class="app-btn app-btn-ghost" id="save-key-btn">Save</button>
     </div>
+
     <div id="key-saved" class="key-saved" hidden>
         <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M20 6L9 17l-5-5"/>
         </svg>
-        <span id="key-saved-text">API key saved</span>
+        <span>Settings saved</span>
     </div>
 </section>
 
@@ -55,33 +77,89 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-    const input = document.getElementById('api-key-input');
-    const btn = document.getElementById('save-key-btn');
-    const saved = document.getElementById('key-saved');
-    const savedText = document.getElementById('key-saved-text');
+    // Server-side key availability from Django context
+    const serverKeys = {
+        anthropic: {{ has_anthropic_key|yesno:"true,false" }},
+        openai:    {{ has_openai_key|yesno:"true,false" }},
+    };
 
-    function reflect() {
-        const existing = localStorage.getItem('chesslens_api_key');
-        if (existing) {
-            saved.hidden = false;
-            savedText.textContent = 'API key saved';
-            input.placeholder = 'Key saved — enter a new one to replace';
-        } else {
-            saved.hidden = true;
+    const providerSelect = document.getElementById('llm-provider-select');
+    const modelSelect    = document.getElementById('llm-model-select');
+    const keyInput       = document.getElementById('api-key-input');
+    const saveBtn        = document.getElementById('save-key-btn');
+    const savedEl        = document.getElementById('key-saved');
+    const serverBadge    = document.getElementById('server-key-badge');
+
+    const KEY_PLACEHOLDERS = {
+        anthropic: 'sk-ant-api03-…',
+        openai:    'sk-proj-…',
+    };
+
+    // Populate model dropdown for the given provider, preserving any saved choice.
+    function populateModels(provider) {
+        const saved = localStorage.getItem('chesslens_llm_model') || '';
+        const models = ChessLens.MODELS[provider] || [];
+        modelSelect.innerHTML = '';
+        for (const m of models) {
+            const opt = document.createElement('option');
+            opt.value = m.value;
+            opt.textContent = m.label;
+            modelSelect.appendChild(opt);
+        }
+        // Restore saved model if it belongs to this provider, else use default.
+        const match = models.find(m => m.value === saved);
+        modelSelect.value = match ? saved : (ChessLens.DEFAULT_MODELS[provider] || models[0]?.value || '');
+    }
+
+    // Update placeholder, server-key badge, and existing-key hint.
+    function updateKeyUI(provider) {
+        keyInput.placeholder = KEY_PLACEHOLDERS[provider] || '';
+
+        const hasServerKey = serverKeys[provider];
+        serverBadge.hidden = !hasServerKey;
+
+        const storedKey = ChessLens.getApiKey(provider);
+        if (storedKey) {
+            keyInput.placeholder = 'Key saved — enter a new one to replace';
+        } else if (hasServerKey) {
+            keyInput.placeholder = 'Optional — leave blank to use server key';
         }
     }
-    reflect();
+
+    // Restore saved provider selection.
+    const savedProvider = localStorage.getItem('chesslens_llm_provider') || 'anthropic';
+    providerSelect.value = savedProvider;
+    populateModels(savedProvider);
+    updateKeyUI(savedProvider);
+
+    providerSelect.addEventListener('change', () => {
+        const p = providerSelect.value;
+        populateModels(p);
+        updateKeyUI(p);
+        savedEl.hidden = true;
+    });
 
     function save() {
-        const key = input.value.trim();
-        if (!key) return;
-        localStorage.setItem('chesslens_api_key', key);
-        input.value = '';
-        reflect();
+        const provider = providerSelect.value;
+        const model    = modelSelect.value;
+        const key      = keyInput.value.trim();
+
+        localStorage.setItem('chesslens_llm_provider', provider);
+        if (model) localStorage.setItem('chesslens_llm_model', model);
+
+        if (key) {
+            const storageKey = provider === 'openai' ? 'openai_api_key' : 'anthropic_api_key';
+            localStorage.setItem(storageKey, key);
+            keyInput.value = '';
+        }
+
+        updateKeyUI(provider);
+        savedEl.hidden = false;
     }
 
-    btn.addEventListener('click', save);
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); });
+    saveBtn.addEventListener('click', save);
+    keyInput.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
+    modelSelect.addEventListener('change', () => { savedEl.hidden = true; });
 });
 </script>
 {% endblock %}

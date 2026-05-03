@@ -17,6 +17,7 @@ python-chess>=1.10
 
 # AI
 anthropic>=0.34
+openai>=1.0
 
 # Utilities
 python-dotenv>=1.0
