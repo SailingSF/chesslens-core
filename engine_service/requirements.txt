@@ -1,2 +1,0 @@
-chess>=1.11
-python-chess>=1.999

@@ -1,12 +1,10 @@
 """
-EngineService — interface and implementations.
+EngineService — interface and PooledEngineService implementation.
 
-Implementations:
-  - PooledEngineService — reuses Stockfish processes via EnginePool (default)
-  - RemoteEngineService — HTTP dispatch to engine container (Docker mode)
+PooledEngineService reuses Stockfish processes via EnginePool.
 
 Factory:
-  get_engine_service() returns the correct implementation based on settings.
+  get_engine_service() returns a shared PooledEngineService instance.
 """
 
 from __future__ import annotations
@@ -318,109 +316,6 @@ class PooledEngineService(EngineService):
         self._started_ids.clear()
 
 
-class RemoteEngineService(EngineService):
-    """
-    Dispatches analysis to the engine service container via HTTP.
-
-    Used when ENGINE_URL is set (Docker mode). The engine container runs
-    engine_service/server.py and exposes POST /analyze.
-    """
-
-    def __init__(self, engine_url: str):
-        self._engine_url = engine_url.rstrip("/")
-        self._remote_engine = DiscoveredEngine(
-            id="remote",
-            name="Remote engine",
-            version="remote",
-            path=engine_url,
-        )
-
-    def list_engines(self) -> list[DiscoveredEngine]:
-        return [self._remote_engine]
-
-    def default_engine_id(self) -> Optional[str]:
-        return self._remote_engine.id
-
-    async def analyze(
-        self,
-        fen: str,
-        *,
-        depth: int = 20,
-        nodes: Optional[int] = None,
-        multipv: int = 3,
-        uci_options: Optional[dict] = None,
-        pv_length: Optional[int] = None,
-        pv_end_nodes: Optional[int] = None,
-        played_move_uci: Optional[str] = None,
-        played_move_nodes: Optional[int] = None,
-        engine_id: Optional[str] = None,
-    ) -> EngineResult:
-        import httpx
-
-        payload = {
-            "fen": fen,
-            "depth": depth,
-            "multipv": multipv,
-            "uci_options": uci_options or {},
-        }
-        if nodes is not None:
-            payload["nodes"] = nodes
-        if pv_length is not None:
-            payload["pv_length"] = pv_length
-        if pv_end_nodes is not None:
-            payload["pv_end_nodes"] = pv_end_nodes
-        if played_move_uci is not None:
-            payload["played_move_uci"] = played_move_uci
-        if played_move_nodes is not None:
-            payload["played_move_nodes"] = played_move_nodes
-        if engine_id is not None:
-            payload["engine_id"] = engine_id
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{self._engine_url}/analyze", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-
-        candidates = [_candidate_from_dict(c) for c in data.get("candidates", [])]
-        played_move_dict = data.get("played_move")
-        played_move = _candidate_from_dict(played_move_dict) if played_move_dict else None
-
-        return EngineResult(
-            fen=fen,
-            depth=data.get("depth", depth),
-            candidates=candidates,
-            played_move=played_move,
-        )
-
-
-def _candidate_from_dict(c: dict) -> CandidateMove:
-    move = chess.Move.from_uci(c["move"])
-    pv = [chess.Move.from_uci(m) for m in c.get("pv", [])]
-    pv_end = None
-    pv_end_data = c.get("pv_end")
-    if pv_end_data:
-        pv_end = PVEndEval(
-            score_cp=pv_end_data.get("score_cp"),
-            mate_in=pv_end_data.get("mate_in"),
-            depth=pv_end_data.get("depth"),
-            seldepth=pv_end_data.get("seldepth"),
-            pushed=pv_end_data.get("pushed", 0),
-            fen=pv_end_data.get("fen", ""),
-            terminal=pv_end_data.get("terminal"),
-        )
-    return CandidateMove(
-        move=move,
-        score_cp=c.get("score_cp"),
-        mate_in=c.get("mate_in"),
-        pv=pv,
-        wdl_win=c.get("wdl_win"),
-        wdl_draw=c.get("wdl_draw"),
-        wdl_loss=c.get("wdl_loss"),
-        seldepth=c.get("seldepth"),
-        pv_end=pv_end,
-    )
-
-
 def _parse_candidates(info_list: list) -> list[CandidateMove]:
     """Convert python-chess InfoDict list to CandidateMove list."""
     candidates = []
@@ -533,48 +428,39 @@ async def _compute_pv_end(
 
 
 # ---------------------------------------------------------------------------
-# Singleton factory — returns the right implementation based on Django settings
+# Singleton factory
 # ---------------------------------------------------------------------------
 
 _engine_service: Optional[EngineService] = None
 
 
 def get_engine_service() -> EngineService:
-    """
-    Return a shared EngineService instance.
-
-    - If ENGINE_URL is set → RemoteEngineService (Docker / cloud)
-    - Otherwise → PooledEngineService with a local Stockfish pool
-    """
+    """Return a shared PooledEngineService instance."""
     global _engine_service
     if _engine_service is not None:
         return _engine_service
 
     from django.conf import settings
 
-    engine_url = getattr(settings, "ENGINE_URL", None)
-    if engine_url:
-        _engine_service = RemoteEngineService(engine_url)
-    else:
-        import os
-        cpu_count = os.cpu_count() or 2
-        pool_size = min(cpu_count, 2)
-        threads_per_engine = max(1, cpu_count // pool_size)
+    import os
+    cpu_count = os.cpu_count() or 2
+    pool_size = min(cpu_count, 2)
+    threads_per_engine = max(1, cpu_count // pool_size)
 
-        engines = discover_engines()
-        if engines:
-            preference = getattr(settings, "STOCKFISH_DEFAULT_ENGINE", None)
-            default = choose_default(engines, preference)
-            _engine_service = PooledEngineService(
-                engines=engines,
-                default_engine_id=default.id if default else None,
-                pool_size=pool_size,
-                threads_per_engine=threads_per_engine,
-            )
-        else:
-            # Backwards-compatible fallback: no binaries discovered, fall back
-            # to the bare `stockfish` command on PATH via a single legacy pool.
-            pool = EnginePool(size=pool_size, threads=threads_per_engine)
-            _engine_service = PooledEngineService(pool)
+    engines = discover_engines()
+    if engines:
+        preference = getattr(settings, "STOCKFISH_DEFAULT_ENGINE", None)
+        default = choose_default(engines, preference)
+        _engine_service = PooledEngineService(
+            engines=engines,
+            default_engine_id=default.id if default else None,
+            pool_size=pool_size,
+            threads_per_engine=threads_per_engine,
+        )
+    else:
+        # Fallback: no binaries discovered, use the bare `stockfish` command
+        # on PATH via a single legacy pool.
+        pool = EnginePool(size=pool_size, threads=threads_per_engine)
+        _engine_service = PooledEngineService(pool)
 
     return _engine_service

@@ -11,4 +11,4 @@ COPY . .
 
 RUN python manage.py collectstatic --noinput || true
 
-CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "config.asgi:application"]
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]

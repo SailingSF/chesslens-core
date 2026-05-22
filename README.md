@@ -8,7 +8,7 @@ No subscription required. Your games, your hardware, your analysis.
 
 ## Quick Start
 
-You need **Python 3.12+** and an **Anthropic API key** ([sign up](https://console.anthropic.com/)). Analysis typically costs a few cents per game.
+You need **Python 3.12+** and an **Anthropic API key** ([sign up](https://console.anthropic.com/)) or an **OpenAI API key** ([sign up](https://platform.openai.com/)). Analysis typically costs a few cents per game.
 
 ```bash
 # 1. Clone and install
@@ -61,7 +61,7 @@ Four layers:
 1. **Chess Engine** (`chess_engine/`) — Stockfish process pool, one per binary version.
 2. **Context Assembly** (`analysis/`) — opening ID, tactical patterns, pawn structure, threat narrative.
 3. **Priority Classifier** (`analysis/priority.py`) — pure logic; categorizes positions as CRITICAL, TACTICAL, or STRATEGIC.
-4. **Explanation Layer** (`explanation/`) — calls Claude with structured context. The LLM never calculates — it only narrates what Stockfish found.
+4. **Explanation Layer** (`explanation/`) — calls Claude or OpenAI with structured context. The LLM never calculates — it only narrates what Stockfish found.
 
 Stockfish evaluations are converted to win probabilities via a sigmoid function, and the EP loss between the best and played move drives classification. Parameters are calibrated against chess.com using Stockfish 16.1 with 1M-node searches.
 
@@ -71,7 +71,8 @@ Stockfish evaluations are converted to win probabilities via a sigmoid function,
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | **Required.** Claude API key. |
+| `ANTHROPIC_API_KEY` | — | Claude API key (required if you want to use a Claude model). |
+| `OPENAI_API_KEY` | — | OpenAI API key (required if you want to use a GPT/o-series model). |
 | `STOCKFISH_DIR` | — | Extra directory to scan for Stockfish binaries. |
 | `STOCKFISH_DEFAULT_ENGINE` | — | Preferred engine id / version substring (else first 16.1 match). |
 | `STOCKFISH_DEFAULT_NODES` | `500000` | Nodes per search. |
@@ -79,8 +80,6 @@ Stockfish evaluations are converted to win probabilities via a sigmoid function,
 | `STOCKFISH_PV_LENGTH` | — | Truncate PVs to N plies (off by default). |
 | `STOCKFISH_PV_END_NODES` | — | Re-evaluate PV endpoints with this node budget. |
 | `STOCKFISH_PLAYED_MOVE_NODES` | — | `searchmoves` budget for moves outside top-N. |
-| `ENGINE_URL` | — | Remote engine service URL (set automatically in Docker). |
-| `REDIS_URL` | `redis://localhost:6379` | Redis connection. |
 | `DEBUG` | `True` | Django debug mode. |
 
 ---
@@ -102,7 +101,7 @@ echo "ANTHROPIC_API_KEY=sk-ant-your-key-here" > .env
 docker compose up
 ```
 
-Full stack (app + engine container + Redis) at [http://localhost:8000](http://localhost:8000).
+App at [http://localhost:8000](http://localhost:8000).
 
 ---
 
