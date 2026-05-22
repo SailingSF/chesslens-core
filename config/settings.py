@@ -33,7 +33,6 @@ CHESSLENS_ENABLE_UI = os.environ.get("CHESSLENS_ENABLE_UI", "True") == "True"
 # Application definition
 
 INSTALLED_APPS = [
-    "daphne",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -43,14 +42,12 @@ INSTALLED_APPS = [
     # Third-party
     "rest_framework",
     "corsheaders",
-    "channels",
     # Local apps
     "chess_engine",
     "analysis",
     "explanation",
     "game",
     "api",
-    "ws",
 ]
 
 if CHESSLENS_ENABLE_UI:
@@ -91,16 +88,6 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
-# Django Channels — Redis channel layer
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {
-            "hosts": [os.environ.get("REDIS_URL", "redis://localhost:6379")],
-        },
-    },
-}
-
 # Database
 DATABASES = {
     "default": {
@@ -108,12 +95,6 @@ DATABASES = {
         "NAME": BASE_DIR / "db.sqlite3",
     }
 }
-
-# Redis cache (position evaluations, session state)
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
-
-# Engine service
-ENGINE_URL = os.environ.get("ENGINE_URL", None)  # None = local subprocess
 
 
 def _int_env(name: str, default: int | None) -> int | None:
