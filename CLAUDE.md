@@ -137,6 +137,7 @@ docker compose up
 | `DATABASE_URL` | No | DB connection (default: SQLite) |
 | `DJANGO_SECRET_KEY` | No | Django secret key (auto-generated in dev) |
 | `DEBUG` | No | Debug mode (default: `True` in dev) |
+| `STOCKFISH_DIR` | No | Extra dir(s) to scan for Stockfish binaries, `os.pathsep`-separated. `./engines`, `../engines`, and `$PATH` are always scanned. |
 
 ## Adding a New Feature
 

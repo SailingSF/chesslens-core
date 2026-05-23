@@ -7,14 +7,19 @@ Results are cached so discovery only pays the subprocess cost once.
 
 Directories scanned (in order):
   1. ./engines/ relative to Django BASE_DIR (recommended drop-in location)
-  2. $STOCKFISH_DIR (optional extra directory)
-  3. $PATH (resolves the bare `stockfish` command)
+  2. ../engines/ — sibling of BASE_DIR (handles a chesslens/chesslens-core
+     monorepo layout where built engines live next to the app)
+  3. $STOCKFISH_DIR — one or more dirs, os.pathsep-separated (`:` on Unix)
+  4. $PATH (resolves the bare `stockfish` command and any versioned siblings)
 
-Typical layout:
-    chesslens-core/
-    └── engines/
-        ├── stockfish-16.1
-        └── stockfish-17
+Engine directories (1–3) are scanned recursively up to ``MAX_SCAN_DEPTH``, so
+both flat drop-ins and source build trees are found. $PATH entries are scanned
+top-level only to keep discovery fast.
+
+Supported layouts (all discovered automatically):
+    engines/stockfish-16.1                 # flat binary
+    engines/stockfish-17/src/stockfish     # source build tree
+    engines/stockfish-17/stockfish         # extracted release dir
 """
 
 from __future__ import annotations
@@ -40,36 +45,78 @@ class DiscoveredEngine:
 
 _cache: Optional[list[DiscoveredEngine]] = None
 
+# How deep to recurse into engine directories. Reaches a source build tree
+# such as engines/stockfish-16.1/src/stockfish while bounding the walk.
+MAX_SCAN_DEPTH = 4
 
-def _candidate_paths(extra_dirs: Iterable[Path]) -> list[Path]:
+# Directory names never worth descending into when hunting for binaries.
+_PRUNE_DIRS = {".git", "node_modules", "__pycache__", "tests", ".github"}
+
+
+def _looks_like_engine(entry: Path) -> bool:
+    """True if `entry` is an executable file named like a Stockfish binary."""
+    if not entry.is_file():
+        return False
+    if not entry.name.lower().startswith("stockfish"):
+        return False
+    # Skip docs/assets that happen to share the prefix.
+    if entry.suffix.lower() in (".txt", ".md", ".pdf", ".html", ".o", ".a"):
+        return False
+    try:
+        mode = entry.stat().st_mode
+    except OSError:
+        return False
+    return bool(mode & stat.S_IXUSR)
+
+
+def _scan_dir(root: Path, *, recursive: bool, max_depth: int) -> Iterable[Path]:
+    """Yield candidate engine binaries under `root`."""
+    if recursive:
+        root_str = str(root)
+        for dirpath, dirnames, filenames in os.walk(root):
+            depth = dirpath[len(root_str):].count(os.sep)
+            if depth >= max_depth:
+                dirnames[:] = []
+            else:
+                dirnames[:] = sorted(d for d in dirnames if d not in _PRUNE_DIRS)
+            for name in sorted(filenames):
+                entry = Path(dirpath) / name
+                if _looks_like_engine(entry):
+                    yield entry
+    else:
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if _looks_like_engine(entry):
+                yield entry
+
+
+def _candidate_paths(engine_dirs: Iterable[Path], path_dirs: Iterable[Path]) -> list[Path]:
     seen: set[Path] = set()
     out: list[Path] = []
-    for d in extra_dirs:
-        if not d or not d.is_dir():
-            continue
-        for entry in sorted(d.iterdir()):
-            if not entry.is_file():
-                continue
-            if not entry.name.lower().startswith("stockfish"):
-                continue
-            try:
-                mode = entry.stat().st_mode
-            except OSError:
-                continue
-            if not (mode & stat.S_IXUSR):
-                continue
-            resolved = entry.resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            out.append(resolved)
+
+    def add(entry: Path) -> None:
+        resolved = entry.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        out.append(resolved)
+
+    for d in engine_dirs:
+        if d and d.is_dir():
+            for entry in _scan_dir(d, recursive=True, max_depth=MAX_SCAN_DEPTH):
+                add(entry)
+
+    for d in path_dirs:
+        if d and d.is_dir():
+            for entry in _scan_dir(d, recursive=False, max_depth=0):
+                add(entry)
 
     which = shutil.which("stockfish")
     if which:
-        resolved = Path(which).resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            out.append(resolved)
+        add(Path(which))
 
     return out
 
@@ -111,38 +158,34 @@ def discover_engines(extra_dirs: Optional[Iterable[Path]] = None) -> list[Discov
     if _cache is not None:
         return _cache
 
-    dirs: list[Path] = []
+    # Directories scanned recursively for engine binaries.
+    engine_dirs: list[Path] = []
     try:
         from django.conf import settings
         base = Path(getattr(settings, "BASE_DIR", Path.cwd()))
-        dirs.append(base / "engines")
     except Exception:
-        dirs.append(Path.cwd() / "engines")
+        base = Path.cwd()
+    engine_dirs.append(base / "engines")
+    engine_dirs.append(base.parent / "engines")
 
+    # STOCKFISH_DIR may list several directories, os.pathsep-separated.
     env_dir = os.environ.get("STOCKFISH_DIR")
     if env_dir:
-        dirs.append(Path(env_dir))
+        engine_dirs.extend(Path(p) for p in env_dir.split(os.pathsep) if p)
 
     if extra_dirs:
-        dirs.extend(Path(d) for d in extra_dirs)
+        engine_dirs.extend(Path(d) for d in extra_dirs)
 
-    # Also scan each PATH entry for stockfish* binaries (catches versioned
-    # names like stockfish-16.1 that `shutil.which("stockfish")` misses).
-    seen_dirs: set[Path] = set()
+    # Each PATH entry is scanned top-level only — catches versioned names like
+    # stockfish-16.1 that `shutil.which("stockfish")` misses, without paying to
+    # recurse system directories.
+    path_dirs: list[Path] = []
     for entry in os.environ.get("PATH", "").split(os.pathsep):
-        if not entry:
-            continue
-        try:
-            resolved = Path(entry).resolve()
-        except OSError:
-            continue
-        if resolved in seen_dirs:
-            continue
-        seen_dirs.add(resolved)
-        dirs.append(resolved)
+        if entry:
+            path_dirs.append(Path(entry))
 
     found: list[DiscoveredEngine] = []
-    for path in _candidate_paths(dirs):
+    for path in _candidate_paths(engine_dirs, path_dirs):
         version = _probe_version(path)
         if version is None:
             continue
