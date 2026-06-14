@@ -149,8 +149,8 @@ class GameAnalyzer:
             main_kwargs = {"depth": analysis_depth, "multipv": multipv, **self._engine_defaults}
             engine_result = await self._engine.analyze(played_on.fen(), **main_kwargs)
 
-            # If the played move isn't in the multi-PV candidates, evaluate
-            # the position AFTER the move and negate the score.
+            # If the played move isn't in the multi-PV candidates, evaluate the
+            # position AFTER the move to recover the played move's value.
             if not any(c.move == move for c in engine_result.candidates):
                 post_board = played_on.copy()
                 post_board.push(move)
@@ -160,8 +160,11 @@ class GameAnalyzer:
                 post_result = await self._engine.analyze(post_board.fen(), **followup_kwargs)
                 if post_result.candidates:
                     post_best = post_result.best
-                    played_cp = -post_best.score_cp if post_best.score_cp is not None else None
-                    played_mate = -post_best.mate_in if post_best.mate_in is not None else None
+                    # `analyze()` returns white-POV scores (score.white()), so the
+                    # after-position eval is already the played move's white-POV
+                    # value — no sign flip (the candidate list is white-POV too).
+                    played_cp = post_best.score_cp
+                    played_mate = post_best.mate_in
                     engine_result.candidates.append(CandidateMove(
                         move=move,
                         score_cp=played_cp,

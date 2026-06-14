@@ -36,9 +36,15 @@ class ClassificationConfig:
     # +2.05pp overall, +4.7pp at Elo≥1900, +6.2pp inaccuracy recall, +6.0pp
     # mistake recall; low-Elo buckets preserved (≤0.1pp drift). Floor stays at
     # 0.85 — any lower value crashed low-Elo accuracy sharply in the sweep.
+    #
+    # Refit on the depth-16 MultiPV-1 headline eval (2026-06-13, sweep round 6):
+    # range 0.60→0.70, steepness 0.008→0.010. The sharper depth-16 eval supports
+    # slightly more Elo-dependent harshness; +0.11pp full-corpus, +1.1pp mistake
+    # recall, no Elo bucket regressed. k_base could not move (every variant lost
+    # ≥1.4pp); range≥0.75 overshot. See findings.md.
     elo_scale_floor: float = 0.85
-    elo_scale_range: float = 0.6
-    elo_scale_steepness: float = 0.008
+    elo_scale_range: float = 0.7
+    elo_scale_steepness: float = 0.010
     elo_scale_midpoint: float = 1500.0
 
     # --- EP thresholds — pinned to chess.com's published table ---
