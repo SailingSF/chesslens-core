@@ -16,14 +16,17 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from rest_framework.exceptions import ValidationError
 
-from analysis.context import ContextAssembler
+from analysis.context import ContextAssembler, format_candidates
 from analysis.priority import classify
 from api.serializers import (
     GameReviewSerializer,
+    PositionChatSerializer,
     PositionExplorerSerializer,
 )
 from chess_engine.service import get_engine_service
+from explanation.chat import get_chat_agent
 from explanation.generator import get_explainer
+from explanation.prompts import build_chat_system_prompt, format_position_context
 from explanation.providers import make_llm_config
 from game.analyzer import GameAnalyzer
 
@@ -196,26 +199,7 @@ async def position_explorer(request):
     context = _assembler.assemble(board, result)
     priority = classify(result, board=board)
 
-    # Build candidate list with SAN notation
-    candidates = []
-    for candidate in result.candidates:
-        # Convert move to SAN
-        move_san = board.san(candidate.move)
-        # Convert PV to SAN
-        pv_san = []
-        temp = board.copy()
-        for pv_move in candidate.pv[:6]:
-            try:
-                pv_san.append(temp.san(pv_move))
-                temp.push(pv_move)
-            except Exception:
-                break
-        candidates.append({
-            "move": move_san,
-            "cp": candidate.score_cp,
-            "mate_in": candidate.mate_in,
-            "pv": pv_san,
-        })
+    candidates = format_candidates(board, result)
 
     llm_config = _build_llm_config(request, data)
     explainer = get_explainer()
@@ -230,4 +214,56 @@ async def position_explorer(request):
         "candidates": candidates,
         "opening": context.opening_name,
         "eco": context.eco_code,
+    })
+
+
+@csrf_exempt
+@require_POST
+async def position_chat(request):
+    """
+    Chat about a position. Stateless: the client sends the FEN and the full
+    visible thread; the server rebuilds the engine analysis as context and runs
+    the agentic loop (the LLM may call Stockfish via the analyze_position tool).
+
+    Request body: {"fen": "...", "skill_level": "...", "messages": [{"role", "content"}, ...]}
+    Response: {"reply": "...", "tool_calls": [{"tool", "fen"}, ...]}
+    """
+    body = _parse_json_body(request)
+    if body is None:
+        return _error_response("Invalid JSON body")
+
+    try:
+        data = _validate(PositionChatSerializer, body)
+    except ValidationError as e:
+        return _error_response(str(e.detail))
+
+    fen = data["fen"]
+    skill_level = data.get("skill_level", "intermediate")
+    engine_id = data.get("engine_id") or None
+    messages = [dict(m) for m in data["messages"]]
+
+    engine_defaults = {**_engine_defaults()}
+    if engine_id:
+        engine_defaults["engine_id"] = engine_id
+
+    engine = get_engine_service()
+    result = await engine.analyze(fen, depth=20, **engine_defaults)
+
+    board = chess.Board(fen)
+    context = _assembler.assemble(board, result)
+    candidates = format_candidates(board, result)
+    position_context = format_position_context(context, candidates, board)
+    system = build_chat_system_prompt(skill_level, position_context)
+
+    llm_config = _build_llm_config(request, data)
+    chat_result = await get_chat_agent().run(
+        messages,
+        system=system,
+        llm_config=llm_config,
+        engine_defaults=engine_defaults,
+    )
+
+    return JsonResponse({
+        "reply": chat_result.reply,
+        "tool_calls": chat_result.tool_calls,
     })

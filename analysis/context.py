@@ -731,3 +731,29 @@ class ContextAssembler:
             return "No immediate threats detected."
 
         return "; ".join(threats[:5])  # Cap at 5 to keep prompt concise
+
+
+def format_candidates(board: chess.Board, result: EngineResult, limit: int = 6) -> list[dict]:
+    """Serialize engine candidates to SAN + SAN principal variation.
+
+    Shared by the position-explorer view and the chat tool so both present
+    engine output identically. Each entry: {move, cp, mate_in, pv}.
+    """
+    candidates: list[dict] = []
+    for candidate in result.candidates:
+        move_san = board.san(candidate.move)
+        pv_san: list[str] = []
+        temp = board.copy()
+        for pv_move in candidate.pv[:limit]:
+            try:
+                pv_san.append(temp.san(pv_move))
+                temp.push(pv_move)
+            except Exception:
+                break
+        candidates.append({
+            "move": move_san,
+            "cp": candidate.score_cp,
+            "mate_in": candidate.mate_in,
+            "pv": pv_san,
+        })
+    return candidates
