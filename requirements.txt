@@ -22,6 +22,7 @@ openai>=1.0
 
 # Utilities
 python-dotenv>=1.0
+pyyaml>=6.0
 
 # Dev / testing
 pytest>=8.0
