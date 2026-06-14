@@ -118,9 +118,24 @@ cp .env.sample .env
 # Run migrations
 python manage.py migrate
 
-# Start the dev server
+# Start the dev server (serves ASGI via Daphne — see note below)
 python manage.py runserver
+# or run uvicorn directly:
+uvicorn config.asgi:application --reload
 ```
+
+> **The app must run under ASGI, never WSGI.** The views are native-async and
+> the engine pool / LLM clients are process-lifetime singletons bound to one
+> event loop. Plain WSGI serving spins up a fresh event loop per request
+> (asgiref runs each async view through `asyncio.run`); the first request
+> works, but every request after it hangs because the engine's Stockfish
+> subprocess transports are stranded on the now-closed first loop.
+>
+> Two things keep this from happening:
+> - `daphne` is listed **first** in `INSTALLED_APPS`, so `manage.py runserver`
+>   serves ASGI (single persistent loop) instead of WSGI. Don't remove it or
+>   reorder it below `staticfiles`, or `runserver` reverts to WSGI and hangs.
+> - Docker / production run `uvicorn config.asgi:application` directly.
 
 ### Docker
 ```bash
