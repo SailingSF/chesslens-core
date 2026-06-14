@@ -69,6 +69,14 @@ class ExplanationGenerator:
             self._openai_clients[key] = openai.AsyncOpenAI(api_key=key)
         return self._openai_clients[key]
 
+    # Public accessors so other modules (e.g. the chat agent) can reuse the
+    # same per-API-key client cache instead of constructing their own.
+    def get_anthropic_client(self, api_key: str | None) -> anthropic.AsyncAnthropic:
+        return self._get_anthropic_client(api_key)
+
+    def get_openai_client(self, api_key: str | None) -> openai.AsyncOpenAI:
+        return self._get_openai_client(api_key)
+
     # ------------------------------------------------------------------
     # Low-level call helpers
     # ------------------------------------------------------------------

@@ -2,6 +2,22 @@
 {% block title %}Position Explorer — ChessLens{% endblock %}
 
 {% block content %}
+<style>
+    .chat-thread { display:flex; flex-direction:column; gap:8px; max-height:320px;
+        overflow-y:auto; margin-bottom:10px; }
+    .chat-msg { padding:9px 12px; border-radius:2px; font-size:13px; line-height:1.5;
+        max-width:92%; border:1px solid var(--rule-2); }
+    .chat-msg.user { align-self:flex-end; background:#2A2016; color:var(--paper); }
+    .chat-msg.assistant { align-self:flex-start; background:rgba(232, 225, 204, .05);
+        color:var(--paper-dim); }
+    .chat-msg.assistant strong, .chat-msg.user strong { color:var(--paper); font-weight:600; }
+    .chat-msg p { margin:0 0 8px; }
+    .chat-msg p:last-child { margin-bottom:0; }
+    .chat-msg-tools { font-size:11px; color:var(--paper-faint); margin-top:6px;
+        font-style:italic; }
+    .chat-input-row { display:flex; gap:6px; align-items:flex-end; }
+    .chat-input-row .app-textarea { flex:1; min-height:38px; max-height:160px; }
+</style>
 <span class="app-eyebrow">§ Position Explorer</span>
 <h1 class="app-page-title">Explore any position.<br><em>Understand what's happening.</em></h1>
 <p class="app-page-sub">Drag pieces or paste a FEN. Top engine moves with AI explanation calibrated to your level.</p>
@@ -65,6 +81,17 @@
             <div class="expl-panel">
                 <div id="res-explanation" class="expl-body"></div>
             </div>
+
+            <div class="analysis-header" style="margin-top:16px;">
+                <span class="analysis-header-label">Ask the Coach</span>
+                <span class="analysis-header-meta" id="chat-meta"></span>
+            </div>
+            <div id="chat-thread" class="chat-thread"></div>
+            <form id="chat-form" class="chat-input-row">
+                <textarea id="chat-input" class="app-textarea" rows="1"
+                          placeholder="Ask a follow-up about this position…"></textarea>
+                <button type="submit" id="chat-send" class="app-btn app-btn-primary app-btn-sm">Send</button>
+            </form>
         </div>
 
         <div id="empty-state" class="explorer-empty">
@@ -166,6 +193,114 @@ document.addEventListener('DOMContentLoaded', () => {
     const card = document.getElementById('result-card');
     const emptyState = document.getElementById('empty-state');
 
+    // ---- Chat state ----
+    let currentFen = null;
+    let currentSkill = 'intermediate';
+    let chatMessages = [];
+
+    function llmHeaders() {
+        const headers = { 'Content-Type': 'application/json' };
+        const aKey = localStorage.getItem('chesslens_api_key');
+        if (aKey) headers['X-Anthropic-Key'] = aKey;
+        const oKey = localStorage.getItem('chesslens_openai_key');
+        if (oKey) headers['X-OpenAI-Key'] = oKey;
+        return headers;
+    }
+
+    function renderMarkdown(el, text) {
+        if (typeof marked !== 'undefined' && marked.parse) {
+            el.innerHTML = marked.parse(text || '');
+        } else {
+            el.textContent = text || '';
+        }
+    }
+
+    function appendChatMessage(role, content, tools) {
+        const thread = document.getElementById('chat-thread');
+        const div = document.createElement('div');
+        div.className = 'chat-msg ' + role;
+        const body = document.createElement('div');
+        renderMarkdown(body, content);
+        div.appendChild(body);
+        if (tools && tools.length) {
+            const note = document.createElement('div');
+            note.className = 'chat-msg-tools';
+            note.textContent = 'Checked ' + tools.length +
+                ' line' + (tools.length === 1 ? '' : 's') + ' with Stockfish';
+            div.appendChild(note);
+        }
+        thread.appendChild(div);
+        thread.scrollTop = thread.scrollHeight;
+        return div;
+    }
+
+    function resetChat() {
+        chatMessages = [];
+        document.getElementById('chat-thread').innerHTML = '';
+        document.getElementById('chat-meta').textContent = '';
+    }
+
+    const chatForm = document.getElementById('chat-form');
+    const chatInput = document.getElementById('chat-input');
+    const chatSend = document.getElementById('chat-send');
+
+    chatForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const text = chatInput.value.trim();
+        if (!text || !currentFen) return;
+
+        appendChatMessage('user', text);
+        chatMessages.push({ role: 'user', content: text });
+        chatInput.value = '';
+        autoGrowChat();
+        chatSend.disabled = true;
+        chatInput.disabled = true;
+
+        const pending = appendChatMessage('assistant', '_Thinking…_');
+
+        try {
+            const resp = await fetch('/api/position-chat/', {
+                method: 'POST',
+                headers: llmHeaders(),
+                body: JSON.stringify({
+                    fen: currentFen,
+                    skill_level: currentSkill,
+                    messages: chatMessages,
+                    engine_id: document.getElementById('engine-select').value || undefined,
+                }),
+            });
+            if (!resp.ok) {
+                const t = await resp.text();
+                throw new Error(resp.status + ': ' + t);
+            }
+            const data = await resp.json();
+            pending.remove();
+            appendChatMessage('assistant', data.reply || '', data.tool_calls);
+            chatMessages.push({ role: 'assistant', content: data.reply || '' });
+        } catch (err) {
+            pending.remove();
+            appendChatMessage('assistant', 'Error: ' + err.message);
+        } finally {
+            chatSend.disabled = false;
+            chatInput.disabled = false;
+            chatInput.focus();
+        }
+    });
+
+    // Grow the textarea with its content (up to the CSS max-height), and send
+    // on Enter while keeping Shift+Enter for newlines.
+    function autoGrowChat() {
+        chatInput.style.height = 'auto';
+        chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + 'px';
+    }
+    chatInput.addEventListener('input', autoGrowChat);
+    chatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            chatForm.requestSubmit();
+        }
+    });
+
     function formatEval(cp, mateIn) {
         if (mateIn !== null && mateIn !== undefined) return 'M' + Math.abs(mateIn);
         if (cp === null || cp === undefined) return '?';
@@ -239,12 +374,13 @@ document.addEventListener('DOMContentLoaded', () => {
             renderCandidates(data.candidates || []);
 
             const explEl = document.getElementById('res-explanation');
-            if (typeof marked !== 'undefined' && marked.parse) {
-                explEl.innerHTML = marked.parse(data.explanation || '');
-            } else {
-                explEl.textContent = data.explanation || '';
-            }
+            renderMarkdown(explEl, data.explanation || '');
             card.hidden = false;
+
+            // Anchor the chat to this freshly analyzed position.
+            currentFen = fen;
+            currentSkill = level;
+            resetChat();
         } catch (err) {
             document.getElementById('candidates-list').innerHTML = '';
             document.getElementById('res-explanation').textContent = 'Error: ' + err.message;

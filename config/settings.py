@@ -33,6 +33,13 @@ CHESSLENS_ENABLE_UI = os.environ.get("CHESSLENS_ENABLE_UI", "True") == "True"
 # Application definition
 
 INSTALLED_APPS = [
+    # Must be first: overrides `runserver` to serve via ASGI (Daphne) so the
+    # dev server runs on a single persistent event loop. Under the default
+    # WSGI `runserver`, asgiref runs each async view through `asyncio.run`,
+    # giving every request a fresh loop — which strands the engine pool's
+    # Stockfish subprocess transports on a closed loop and hangs every request
+    # after the first.
+    "daphne",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",

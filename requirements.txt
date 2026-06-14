@@ -3,6 +3,16 @@ django>=4.2,<5.2
 djangorestframework>=3.14
 django-cors-headers>=4.3
 
+# ASGI servers — required: the views are native-async and rely on a single
+# persistent event loop. Serving under WSGI spawns a fresh event loop per
+# request, which strands the engine pool's Stockfish subprocess transports on a
+# closed loop and makes every request after the first hang.
+#   - uvicorn: production / Docker entrypoint (`uvicorn config.asgi:application`)
+#   - daphne:  listed first in INSTALLED_APPS so `manage.py runserver` serves
+#              ASGI instead of WSGI (Django's documented async-dev-server path)
+uvicorn[standard]>=0.30
+daphne>=4.0
+
 # Chess
 python-chess>=1.10
 
@@ -12,6 +22,7 @@ openai>=1.0
 
 # Utilities
 python-dotenv>=1.0
+pyyaml>=6.0
 
 # Dev / testing
 pytest>=8.0
