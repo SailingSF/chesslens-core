@@ -145,7 +145,16 @@ class ContextAssembler:
         player_elo: Optional[int] = None,
         opponent_elo: Optional[int] = None,
         prev_context: Optional[AssembledContext] = None,
+        headline_best: Optional[CandidateMove] = None,
+        headline_played: Optional[CandidateMove] = None,
     ) -> AssembledContext:
+        # `headline_best` / `headline_played`, when supplied, carry a
+        # higher-fidelity eval (cold SF16.1 MultiPV-1 depth-16, matching
+        # chess.com's displayed eval far better than the MultiPV-3 search — see
+        # the eval-fidelity finding) for *only* the win-probability / EP-loss
+        # computation. Candidate-gap and PV-end structure stay on the raw
+        # MultiPV-3 candidates, where relative ordering — not absolute cp
+        # fidelity — is what matters.
         best = engine_result.best
         best_move_san = board.san(best.move)
         pv_san = self._pv_to_san(board, best.pv)
@@ -175,18 +184,31 @@ class ContextAssembler:
         provider = resolve_provider(engine_result, self._config, player_elo=player_elo)
         wdl_source = "native" if isinstance(provider, StockfishNativeWDLProvider) else "sigmoid"
 
+        best_for_wp = headline_best if headline_best is not None else best
         best_win_pct = provider.get_win_pct(
-            cp=best.score_cp, mate_in=best.mate_in, elo=player_elo,
-            wdl_win=best.wdl_win, wdl_draw=best.wdl_draw, wdl_loss=best.wdl_loss,
+            cp=best_for_wp.score_cp, mate_in=best_for_wp.mate_in, elo=player_elo,
+            wdl_win=best_for_wp.wdl_win, wdl_draw=best_for_wp.wdl_draw,
+            wdl_loss=best_for_wp.wdl_loss,
         )
 
         played_win_pct = None
-        if played_candidate is not None:
+        if headline_best is not None or headline_played is not None:
+            # Headline path. For the engine's own top move the played line *is*
+            # the best line, so its value is the best headline eval (EP loss
+            # must be 0) — the separate after-position headline search differs
+            # by a fixed-depth horizon ply and would otherwise leak best→good.
+            if played_move is not None and played_move == best.move:
+                played_for_wp = best_for_wp
+            else:
+                played_for_wp = headline_played if headline_played is not None else played_candidate
+        else:
+            played_for_wp = played_candidate
+        if played_for_wp is not None:
             played_win_pct = provider.get_win_pct(
-                cp=played_candidate.score_cp, mate_in=played_candidate.mate_in,
+                cp=played_for_wp.score_cp, mate_in=played_for_wp.mate_in,
                 elo=player_elo,
-                wdl_win=played_candidate.wdl_win, wdl_draw=played_candidate.wdl_draw,
-                wdl_loss=played_candidate.wdl_loss,
+                wdl_win=played_for_wp.wdl_win, wdl_draw=played_for_wp.wdl_draw,
+                wdl_loss=played_for_wp.wdl_loss,
             )
 
         # Candidate gap: how much better is the best move than the 2nd best?
