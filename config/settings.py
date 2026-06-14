@@ -117,6 +117,11 @@ STOCKFISH_PV_END_NODES = _int_env("STOCKFISH_PV_END_NODES", None)
 STOCKFISH_PLAYED_MOVE_NODES = _int_env("STOCKFISH_PLAYED_MOVE_NODES", None)
 STOCKFISH_DEFAULT_ENGINE = os.environ.get("STOCKFISH_DEFAULT_ENGINE", "") or None
 STOCKFISH_DIR = os.environ.get("STOCKFISH_DIR", "") or None
+# Run a cold MultiPV-1 fixed-depth "headline" search per position for the
+# win-prob / EP-loss figure that drives classification. Tracks chess.com's
+# displayed eval far better than the MultiPV-3 search (+1.3pp deterministic
+# 7-class accuracy on the scraped corpus). See findings.md.
+STOCKFISH_HEADLINE_EVAL = os.environ.get("STOCKFISH_HEADLINE_EVAL", "1") not in ("0", "false", "False", "")
 
 # LLM providers
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")

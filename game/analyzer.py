@@ -62,12 +62,26 @@ class GameAnalyzer:
         assembler: Optional[ContextAssembler] = None,
         explainer: Optional[ExplanationGenerator] = None,
         engine_defaults: Optional[dict] = None,
+        headline_eval: Optional[bool] = None,
     ):
         self._engine = engine
         self._assembler = assembler or ContextAssembler()
         self._explainer = explainer or ExplanationGenerator()
         self._eco = self._assembler._eco
         self._engine_defaults = engine_defaults or {}
+        # Headline eval-fidelity pass: a cold MultiPV-1 fixed-depth search of
+        # the before/after positions, used only for the win-prob / EP-loss
+        # figure that drives classification. Its eval tracks chess.com's
+        # displayed eval far better than the MultiPV-3 search, whose wider root
+        # search shifts the top line's number (~7cp median) — enough to flip
+        # labels at the 0.02-EP-wide class boundaries. See findings.md.
+        if headline_eval is None:
+            try:
+                from django.conf import settings
+                headline_eval = getattr(settings, "STOCKFISH_HEADLINE_EVAL", True)
+            except Exception:
+                headline_eval = True
+        self._headline_eval = headline_eval
 
     async def analyze_pgn(
         self,
@@ -155,11 +169,39 @@ class GameAnalyzer:
                         pv=[move],
                     ))
 
+            # Headline eval-fidelity pass (MultiPV-1, fixed depth). Force
+            # depth-based search regardless of the env default's node limit —
+            # the chess.com match is specifically a fixed-depth-16 effect.
+            headline_best = None
+            headline_played = None
+            if self._headline_eval:
+                hk = {"depth": analysis_depth, "multipv": 1}
+                if "engine_id" in self._engine_defaults:
+                    hk["engine_id"] = self._engine_defaults["engine_id"]
+                before_h = await self._engine.analyze(played_on.fen(), **hk)
+                if before_h.candidates:
+                    headline_best = before_h.best
+                hp_board = played_on.copy()
+                hp_board.push(move)
+                after_h = await self._engine.analyze(hp_board.fen(), **hk)
+                if after_h.candidates:
+                    ab = after_h.best
+                    # analyze() returns white-POV scores, so the after-position
+                    # eval is already the played move's white-POV value — no
+                    # sign flip (matches the cache convention in preprocess).
+                    headline_played = CandidateMove(
+                        move=move, score_cp=ab.score_cp, mate_in=ab.mate_in,
+                        pv=[move, *ab.pv],
+                        wdl_win=ab.wdl_win, wdl_draw=ab.wdl_draw, wdl_loss=ab.wdl_loss,
+                    )
+
             context = self._assembler.assemble(
                 played_on, engine_result, move,
                 player_elo=move_player_elo,
                 opponent_elo=move_opponent_elo,
                 prev_context=prev_context,
+                headline_best=headline_best,
+                headline_played=headline_played,
             )
             priority = classify(engine_result, board=played_on)
             prev_context = context
