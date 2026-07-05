@@ -37,6 +37,7 @@ chesslens-core/
 │   ├── providers.py     # LLMConfig + provider selection (anthropic vs openai)
 │   └── templates/       # game_review.py
 ├── game/                # GameAnalyzer (PGN orchestrator)
+├── chesscom/            # Chess.com game import: async API client, importer, local PGN storage
 ├── api/                 # DRF views (async), serializers, URL config
 ├── ui/                  # Frontend templates and static assets
 ├── chesscom-review-download/  # Bookmarklet to extract chess.com review data as CSV
@@ -70,6 +71,9 @@ Provider-agnostic config. Model names starting with `claude-` → Anthropic; eve
 ### GameAnalyzer (`game/analyzer.py`)
 Top-level orchestrator: iterates PGN moves, calls engine, assembles context, filters which moves deserve explanations (cp loss threshold + priority escalation), calls the LLM. Skips forced moves and recaptures.
 
+### Chess.com Import (`chesscom/`)
+Optional one-time import of a player's chess.com game history into a local folder (`IMPORTED_GAMES_DIR`, default `imported_games/`, gitignored). `ChessComClient` (`client.py`) calls the public API via async httpx with serial requests + 429 retry; `GameImporter` (`importer.py`) yields per-archive progress events for SSE and keeps `index.json` (metadata + idempotency ledger) updated per archive, so interrupted imports resume and completed past months are never re-fetched. Standard-chess games only; variants and PGN-less games are skipped. `storage.py` resolves filenames exclusively through the index (no client-supplied paths). The Game Review page shows a picker for imported games that fills the PGN textarea — the review pipeline itself is unchanged.
+
 ## API Endpoints
 
 | Method | Path | Description |
@@ -77,6 +81,9 @@ Top-level orchestrator: iterates PGN moves, calls engine, assembles context, fil
 | POST | `/api/game-review/` | Submit PGN, stream analysis via SSE |
 | POST | `/api/position-explorer/` | Analyze single FEN synchronously |
 | GET  | `/api/engines/` | List available Stockfish engines |
+| POST | `/api/chesscom-import/` | Import a chess.com user's game history, stream progress via SSE |
+| GET  | `/api/imported-games/` | List imported players, or games with `?username=` |
+| GET  | `/api/imported-games/<username>/<game_id>/` | Fetch one imported game's PGN + metadata |
 
 Per-request LLM overrides come from headers (`X-LLM-Provider`, `X-LLM-Model`, `X-LLM-Reasoning`, `X-Anthropic-Key`, `X-OpenAI-Key`) handled by `ui/middleware.py::LLMMiddleware`, or from body fields (`llm_provider`, `llm_model`, `llm_reasoning_effort`). Body fields take precedence.
 

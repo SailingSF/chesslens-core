@@ -130,6 +130,10 @@ STOCKFISH_DIR = os.environ.get("STOCKFISH_DIR", "") or None
 # 7-class accuracy on the scraped corpus). See findings.md.
 STOCKFISH_HEADLINE_EVAL = os.environ.get("STOCKFISH_HEADLINE_EVAL", "1") not in ("0", "false", "False", "")
 
+# Local folder where chess.com game imports are stored (one subfolder per
+# username, each with an index.json plus one .pgn file per game).
+IMPORTED_GAMES_DIR = Path(os.environ.get("IMPORTED_GAMES_DIR", "") or (BASE_DIR / "imported_games"))
+
 # LLM providers
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")

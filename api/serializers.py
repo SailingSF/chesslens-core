@@ -17,6 +17,13 @@ class GameReviewSerializer(serializers.Serializer):
     )
 
 
+class ChessComImportSerializer(serializers.Serializer):
+    username = serializers.RegexField(
+        r"^[A-Za-z0-9_-]{1,50}$",
+        error_messages={"invalid": "Invalid chess.com username."},
+    )
+
+
 class PositionExplorerSerializer(serializers.Serializer):
     fen = serializers.CharField()
     skill_level = serializers.ChoiceField(choices=SKILL_LEVELS, default="intermediate")
