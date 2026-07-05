@@ -653,6 +653,89 @@ a:hover { color: var(--amber-hot); }
 .app-footer a { color: var(--paper-faint); text-decoration: none; transition: color .2s; }
 .app-footer a:hover { color: var(--amber); }
 
+/* Chess.com import */
+.import-note {
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: var(--paper-faint);
+}
+.import-note code {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--paper-dim);
+}
+.import-done { margin-top: 14px; }
+.import-done p { margin-bottom: 12px; color: var(--paper); }
+.imported-players-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.imported-player-row {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 12px;
+    background: transparent;
+    border: 1px solid var(--rule-2);
+    border-radius: 2px;
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color .15s;
+}
+.imported-player-row:hover { border-color: rgba(212, 161, 74, .4); }
+.imported-player-meta { color: var(--paper-faint); font-size: 11px; }
+
+/* Imported-game picker (Game Review page) */
+.imported-game-controls { margin-bottom: 10px; max-width: 260px; }
+.imported-game-list {
+    max-height: 260px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--rule-2) transparent;
+    border: 1px solid var(--rule-2);
+    border-radius: 2px;
+}
+.imported-game-row {
+    display: grid;
+    grid-template-columns: 84px 1fr auto auto;
+    gap: 10px;
+    align-items: center;
+    padding: 7px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    border: 1px solid transparent;
+    transition: background .15s;
+}
+.imported-game-row:nth-child(even) { background: rgba(232, 225, 204, .018); }
+.imported-game-row:hover { background: rgba(232, 225, 204, .06); }
+.imported-game-row.selected {
+    background: rgba(212, 161, 74, .13);
+    border-color: rgba(212, 161, 74, .22);
+}
+.imported-game-date {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--paper-faint);
+}
+.imported-game-players { color: var(--paper); }
+.imported-game-players .rating { color: var(--paper-faint); font-size: 11px; }
+.imported-game-class {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--paper-dim);
+}
+.imported-game-result {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    padding: 1px 6px;
+    border-radius: 1px;
+}
+.imported-game-result.win  { background: rgba(30, 132, 73, .22);  color: #7dd9a0; }
+.imported-game-result.loss { background: rgba(200, 90, 62, .2);   color: #e8806a; }
+.imported-game-result.draw { background: rgba(90, 84, 70, .25);   color: var(--paper-faint); }
+.imported-game-result.other { background: rgba(90, 84, 70, .25);  color: var(--paper-faint); }
+
 /* Responsive */
 @media (max-width: 900px) {
     .analysis-layout,

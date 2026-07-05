@@ -1,0 +1,148 @@
+{% extends "ui/base.html" %}
+{% block title %}Import Games — ChessLens{% endblock %}
+
+{% block content %}
+<span class="app-eyebrow">§ Import Games</span>
+<h1 class="app-page-title">Pull your games from chess.com.<br><em>Review them locally.</em></h1>
+<p class="app-page-sub">A one-time, optional step: enter your chess.com username and your game history is downloaded into a local folder. Then pick any game on the Game Review page.</p>
+
+<section class="app-card" style="margin-bottom:24px;">
+    <form id="import-form">
+        <label class="app-label" for="username-input">chess.com username</label>
+        <div class="api-key-row">
+            <input type="text" class="app-input" id="username-input"
+                   placeholder="e.g. hikaru" autocomplete="off"
+                   spellcheck="false" maxlength="50">
+            <button type="submit" id="import-btn" class="app-btn app-btn-primary">Import →</button>
+        </div>
+        <p class="import-note">Only public data is used — no chess.com login required. Games are saved to <code>imported_games/</code> next to the app. Re-running an import only fetches new games.</p>
+    </form>
+    <div id="import-status" class="analysis-status"></div>
+    <div id="import-done" class="import-done" hidden>
+        <p id="import-done-text"></p>
+        <a class="app-btn app-btn-primary" href="{% url 'ui:game-review' %}">Review a game →</a>
+    </div>
+</section>
+
+<section class="app-card" id="imported-players-card" hidden>
+    <h2>Already imported</h2>
+    <div id="imported-players-list" class="imported-players-list"></div>
+</section>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const form = document.getElementById('import-form');
+    const input = document.getElementById('username-input');
+    const btn = document.getElementById('import-btn');
+    const statusEl = document.getElementById('import-status');
+    const doneEl = document.getElementById('import-done');
+    const doneText = document.getElementById('import-done-text');
+    const playersCard = document.getElementById('imported-players-card');
+    const playersList = document.getElementById('imported-players-list');
+
+    async function loadPlayers() {
+        try {
+            const resp = await fetch('/api/imported-games/');
+            const data = await resp.json();
+            const players = data.players || [];
+            if (players.length === 0) { playersCard.hidden = true; return; }
+            playersList.innerHTML = '';
+            for (const p of players) {
+                const row = document.createElement('button');
+                row.type = 'button';
+                row.className = 'imported-player-row';
+                row.innerHTML = `<span class="imported-player-name">${p.username}</span>` +
+                    `<span class="imported-player-meta">${p.game_count} game${p.game_count === 1 ? '' : 's'}</span>`;
+                row.addEventListener('click', () => {
+                    input.value = p.username;
+                    input.focus();
+                });
+                playersList.appendChild(row);
+            }
+            playersCard.hidden = false;
+        } catch (err) {
+            playersCard.hidden = true;
+        }
+    }
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const username = input.value.trim();
+        if (!username) return;
+        if (!/^[A-Za-z0-9_-]{1,50}$/.test(username)) {
+            statusEl.textContent = 'Invalid username — chess.com usernames use letters, digits, - and _ only.';
+            return;
+        }
+
+        btn.disabled = true;
+        btn.setAttribute('aria-busy', 'true');
+        btn.textContent = 'Importing…';
+        doneEl.hidden = true;
+        statusEl.textContent = 'Contacting chess.com…';
+
+        try {
+            const resp = await fetch('/api/chesscom-import/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username }),
+            });
+
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                statusEl.textContent = 'Error: ' + (data.error || `HTTP ${resp.status}`);
+                return;
+            }
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const data = JSON.parse(line.slice(6));
+                    if (data.error) {
+                        statusEl.textContent = 'Error: ' + data.error +
+                            (data.resumable ? ' Progress was saved — run the import again to resume.' : '');
+                        return;
+                    }
+                    if (data.done) {
+                        statusEl.textContent = '';
+                        doneText.textContent = data.total_imported > 0
+                            ? `Imported ${data.total_imported} new game${data.total_imported === 1 ? '' : 's'}` +
+                              (data.total_skipped ? ` (${data.total_skipped} skipped — variants or unfinished)` : '') +
+                              `. ${data.total_games} game${data.total_games === 1 ? '' : 's'} available for review.`
+                            : `Already up to date — ${data.total_games} game${data.total_games === 1 ? '' : 's'} available for review.`;
+                        doneEl.hidden = false;
+                        loadPlayers();
+                        return;
+                    }
+                    if (data.cached) {
+                        statusEl.textContent = `Archive ${data.archive} (${data.archive_index}/${data.total_archives}) — already imported`;
+                    } else {
+                        statusEl.textContent = `Archive ${data.archive} (${data.archive_index}/${data.total_archives})` +
+                            ` — ${data.imported} imported` +
+                            (data.skipped ? `, ${data.skipped} skipped` : '') +
+                            ` (${data.total_imported} total)`;
+                    }
+                }
+            }
+        } catch (err) {
+            statusEl.textContent = 'Error: ' + err.message;
+        } finally {
+            btn.disabled = false;
+            btn.removeAttribute('aria-busy');
+            btn.textContent = 'Import →';
+        }
+    });
+
+    loadPlayers();
+});
+</script>
+{% endblock %}
