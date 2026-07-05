@@ -13,3 +13,4 @@ htmlcov/
 staticfiles/
 specifications/
 tests/test_games/
+imported_games/

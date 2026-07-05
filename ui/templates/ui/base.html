@@ -14,7 +14,7 @@
     <link rel="stylesheet"
           href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
 
-    <link rel="stylesheet" href="{% static 'ui/app.css' %}?v=6">
+    <link rel="stylesheet" href="{% static 'ui/app.css' %}?v=7">
 </head>
 <body>
     <div class="app-bg">
@@ -39,6 +39,8 @@
             <div class="app-nav-links">
                 <a class="app-nav-link {% if active_page == 'review' %}active{% endif %}"
                    href="{% url 'ui:game-review' %}">Game Review</a>
+                <a class="app-nav-link {% if active_page == 'import' %}active{% endif %}"
+                   href="{% url 'ui:import-games' %}">Import Games</a>
                 <a class="app-nav-link {% if active_page == 'explorer' %}active{% endif %}"
                    href="{% url 'ui:position-explorer' %}">Position Explorer</a>
                 <a class="app-nav-link app-nav-ext" href="https://chesslens.ai" target="_blank" rel="noopener">chesslens.ai ↗</a>

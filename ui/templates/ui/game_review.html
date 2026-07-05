@@ -6,6 +6,15 @@
 <h1 class="app-page-title">Review your game.<br><em>Understand every move.</em></h1>
 <p class="app-page-sub">Paste a PGN for Stockfish + classifier analysis with AI narration for every key moment.</p>
 
+<section class="app-card" id="imported-games-card" style="margin-bottom:24px;" hidden>
+    <h2>Your imported games</h2>
+    <div class="imported-game-controls">
+        <label class="app-label" for="import-player-select">Player</label>
+        <select id="import-player-select" class="app-select"></select>
+    </div>
+    <div class="imported-game-list" id="imported-game-list"></div>
+</section>
+
 <section class="app-card" style="margin-bottom:24px;">
     <form id="review-form">
         <label class="app-label" for="pgn-input">PGN</label>
@@ -77,6 +86,66 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.ChessLens && ChessLens.populateEngineSelect) {
         ChessLens.populateEngineSelect('engine-select');
     }
+
+    // --- Imported-games picker (hidden unless games have been imported) ---
+    const importedCard = document.getElementById('imported-games-card');
+    const playerSelect = document.getElementById('import-player-select');
+    const gameListEl = document.getElementById('imported-game-list');
+
+    async function loadImportedGames(username) {
+        const resp = await fetch(`/api/imported-games/?username=${encodeURIComponent(username)}`);
+        const data = await resp.json();
+        gameListEl.innerHTML = '';
+        for (const g of data.games || []) {
+            const row = document.createElement('div');
+            row.className = 'imported-game-row';
+            const whiteRating = g.white_rating ? ` <span class="rating">(${g.white_rating})</span>` : '';
+            const blackRating = g.black_rating ? ` <span class="rating">(${g.black_rating})</span>` : '';
+            row.innerHTML =
+                `<span class="imported-game-date">${g.end_date}</span>` +
+                `<span class="imported-game-players">${g.white}${whiteRating} vs ${g.black}${blackRating}</span>` +
+                `<span class="imported-game-class">${g.time_class}</span>` +
+                `<span class="imported-game-result ${g.result}">${g.result}</span>`;
+            row.addEventListener('click', async () => {
+                try {
+                    const r = await fetch(`/api/imported-games/${encodeURIComponent(username)}/${encodeURIComponent(g.id)}/`);
+                    if (!r.ok) throw new Error('game not found');
+                    const game = await r.json();
+                    document.getElementById('pgn-input').value = game.pgn;
+                    document.getElementById('color-select').value = game.player_color;
+                    gameListEl.querySelectorAll('.imported-game-row.selected')
+                        .forEach(el => el.classList.remove('selected'));
+                    row.classList.add('selected');
+                    document.getElementById('analyze-btn').focus();
+                } catch (err) {
+                    alert('Could not load this game: ' + err.message);
+                }
+            });
+            gameListEl.appendChild(row);
+        }
+    }
+
+    (async () => {
+        try {
+            const resp = await fetch('/api/imported-games/');
+            const data = await resp.json();
+            const players = data.players || [];
+            if (players.length === 0) return;
+            playerSelect.innerHTML = '';
+            for (const p of players) {
+                const opt = document.createElement('option');
+                opt.value = p.username;
+                opt.textContent = `${p.username} (${p.game_count})`;
+                playerSelect.appendChild(opt);
+            }
+            playerSelect.addEventListener('change', () => loadImportedGames(playerSelect.value));
+            importedCard.hidden = false;
+            await loadImportedGames(players[0].username);
+        } catch (err) {
+            /* picker stays hidden if listing fails */
+        }
+    })();
+
     let board = null;
     let positions = [];
     let currentIndex = -1;
