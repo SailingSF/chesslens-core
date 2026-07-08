@@ -26,7 +26,11 @@ from django.conf import settings
 
 from analysis.context import AssembledContext
 from analysis.priority import PriorityResult, PriorityTier
-from explanation.providers import DEFAULT_ANTHROPIC_MODEL, LLMConfig
+from explanation.providers import (
+    ANTHROPIC_EFFORT_MODELS,
+    DEFAULT_ANTHROPIC_MODEL,
+    LLMConfig,
+)
 from explanation.retry import retry_overloaded
 from explanation.templates.game_review import (
     build_game_review_prompt,
@@ -89,14 +93,20 @@ class ExplanationGenerator:
         max_tokens: int,
         system: str | None = None,
         api_key: str | None = None,
+        effort: str | None = None,
     ) -> str:
         client = self._get_anthropic_client(api_key)
         kwargs: dict = dict(model=model, max_tokens=max_tokens, messages=messages)
         if system:
             kwargs["system"] = system
+        # Apply reasoning effort only to models that support output_config.effort
+        # (e.g. Opus/Sonnet); Haiku and older models would reject it.
+        if effort and model in ANTHROPIC_EFFORT_MODELS:
+            kwargs["output_config"] = {"effort": effort}
         try:
             message = await retry_overloaded(lambda: client.messages.create(**kwargs))
-            return message.content[0].text.strip()
+            # Guard against a response with no text block (e.g. a refusal).
+            return next((b.text for b in message.content if b.type == "text"), "").strip()
         except OverloadedError:
             logger.warning("Anthropic API overloaded after all retries, skipping explanation")
             return ""
@@ -159,6 +169,7 @@ class ExplanationGenerator:
             max_tokens=max_tokens,
             system=system,
             api_key=llm_config.api_key,
+            effort=llm_config.reasoning_effort,
         )
 
     # ------------------------------------------------------------------

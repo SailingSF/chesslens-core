@@ -24,7 +24,7 @@ import chess
 from analysis.context import ContextAssembler, format_candidates
 from explanation.generator import ExplanationGenerator, get_explainer
 from explanation.prompts import analyze_position_tool, format_position_context
-from explanation.providers import LLMConfig
+from explanation.providers import ANTHROPIC_EFFORT_MODELS, LLMConfig
 from explanation.retry import retry_overloaded
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,8 @@ class ChatAgent:
             )
         client = self._explainer.get_anthropic_client(llm_config.api_key)
         return await self._run_anthropic_loop(
-            client, llm_config.model, system, conversation, engine_defaults,
+            client, llm_config.model, system, conversation,
+            llm_config.reasoning_effort, engine_defaults,
         )
 
     # ------------------------------------------------------------------
@@ -100,7 +101,7 @@ class ChatAgent:
     # ------------------------------------------------------------------
 
     async def _run_anthropic_loop(
-        self, client, model, system, messages, engine_defaults,
+        self, client, model, system, messages, effort, engine_defaults,
     ) -> ChatResult:
         tool = analyze_position_tool()
         tools = [{
@@ -110,12 +111,18 @@ class ChatAgent:
         }]
         convo = list(messages)
         tool_calls: list[dict] = []
+        # Reasoning effort only for models that accept output_config.effort.
+        effort_kwargs = (
+            {"output_config": {"effort": effort}}
+            if effort and model in ANTHROPIC_EFFORT_MODELS
+            else {}
+        )
 
         for _ in range(MAX_TOOL_ITERATIONS):
             message = await retry_overloaded(
                 lambda: client.messages.create(
                     model=model, max_tokens=MAX_TOKENS, system=system,
-                    messages=convo, tools=tools,
+                    messages=convo, tools=tools, **effort_kwargs,
                 )
             )
             if message.stop_reason != "tool_use":
@@ -137,7 +144,8 @@ class ChatAgent:
         # Tool budget exhausted — force a final text answer without tools.
         message = await retry_overloaded(
             lambda: client.messages.create(
-                model=model, max_tokens=MAX_TOKENS, system=system, messages=convo,
+                model=model, max_tokens=MAX_TOKENS, system=system,
+                messages=convo, **effort_kwargs,
             )
         )
         return ChatResult(reply=_anthropic_text(message), tool_calls=tool_calls)
