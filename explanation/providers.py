@@ -11,32 +11,22 @@ when no effort is specified is "low".
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-# OpenAI models that support the reasoning parameter in the Responses API
-OPENAI_REASONING_MODELS: frozenset[str] = frozenset({
-    "gpt-5.5",
-    "o3",
-    "o3-mini",
-    "o4-mini",
-})
+from config import llm_models
 
-# All recognised OpenAI models (non-exhaustive — unknown names are still
-# forwarded; this list is used only for default-model resolution).
-OPENAI_MODELS: frozenset[str] = frozenset({
-    "gpt-5.5",
-    "gpt-4.1",
-    "gpt-4.1-mini",
-    "gpt-4.1-nano",
-    "gpt-4o",
-    "gpt-4o-mini",
-    "o3",
-    "o3-mini",
-    "o4-mini",
-}) | OPENAI_REASONING_MODELS
+# Model registry lives in config/llm_models.py (single source of truth for the
+# UI picker and these defaults). Effort/reasoning support is derived from it so
+# the two never drift.
 
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
-DEFAULT_OPENAI_MODEL = "gpt-5.5"
+# OpenAI models that support the Responses `reasoning.effort` parameter.
+OPENAI_REASONING_MODELS: frozenset[str] = frozenset(llm_models.openai_reasoning_slugs())
+
+# Anthropic models that support `output_config.effort`.
+ANTHROPIC_EFFORT_MODELS: frozenset[str] = frozenset(llm_models.anthropic_effort_slugs())
+
+DEFAULT_ANTHROPIC_MODEL = llm_models.DEFAULT_ANTHROPIC_MODEL
+DEFAULT_OPENAI_MODEL = llm_models.DEFAULT_OPENAI_MODEL
 DEFAULT_OPENAI_REASONING_EFFORT = "low"
 
 ReasoningEffort = str  # "low" | "medium" | "high"
@@ -62,6 +52,14 @@ class LLMConfig:
     @property
     def uses_reasoning(self) -> bool:
         return self.is_openai and self.model in OPENAI_REASONING_MODELS
+
+    @property
+    def supports_effort(self) -> bool:
+        """Whether this model accepts the effort/reasoning-effort setting
+        (OpenAI reasoning models or Anthropic effort-capable models)."""
+        if self.is_openai:
+            return self.model in OPENAI_REASONING_MODELS
+        return self.model in ANTHROPIC_EFFORT_MODELS
 
 
 def make_llm_config(

@@ -198,15 +198,6 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentSkill = 'intermediate';
     let chatMessages = [];
 
-    function llmHeaders() {
-        const headers = { 'Content-Type': 'application/json' };
-        const aKey = localStorage.getItem('chesslens_api_key');
-        if (aKey) headers['X-Anthropic-Key'] = aKey;
-        const oKey = localStorage.getItem('chesslens_openai_key');
-        if (oKey) headers['X-OpenAI-Key'] = oKey;
-        return headers;
-    }
-
     function renderMarkdown(el, text) {
         if (typeof marked !== 'undefined' && marked.parse) {
             el.innerHTML = marked.parse(text || '');
@@ -261,7 +252,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const resp = await fetch('/api/position-chat/', {
                 method: 'POST',
-                headers: llmHeaders(),
+                headers: ChessLens.apiHeaders(),
                 body: JSON.stringify({
                     fen: currentFen,
                     skill_level: currentSkill,
@@ -346,16 +337,12 @@ document.addEventListener('DOMContentLoaded', () => {
         card.hidden = true;
         emptyState.hidden = true;
 
-        const headers = { 'Content-Type': 'application/json' };
-        const apiKey = localStorage.getItem('chesslens_api_key');
-        if (apiKey) headers['X-Anthropic-Key'] = apiKey;
-
         const level = document.getElementById('skill-select').value;
 
         try {
             const resp = await fetch('/api/position-explorer/', {
                 method: 'POST',
-                headers,
+                headers: ChessLens.apiHeaders(),
                 body: JSON.stringify({
                     fen,
                     skill_level: level,

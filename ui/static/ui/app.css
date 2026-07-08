@@ -525,10 +525,16 @@ a:hover { color: var(--amber-hot); }
 }
 .llm-selector-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr;
     gap: 10px;
     margin-bottom: 12px;
 }
+.llm-effort-hint {
+    font-size: 12px;
+    color: var(--paper-faint);
+    margin: -4px 0 12px;
+}
+.app-select:disabled { opacity: .5; cursor: not-allowed; }
 .llm-key-label-row {
     display: flex; align-items: center; gap: 8px;
     margin-bottom: 6px;
@@ -547,7 +553,7 @@ a:hover { color: var(--amber-hot); }
 .api-key-row { display: flex; gap: 8px; }
 .api-key-row .app-input { flex: 1; }
 
-@media (max-width: 480px) {
+@media (max-width: 620px) {
     .llm-selector-row { grid-template-columns: 1fr; }
 }
 

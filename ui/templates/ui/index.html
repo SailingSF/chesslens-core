@@ -7,15 +7,14 @@
 <p class="app-page-sub">Stockfish evaluation + move classification + AI narration — on your machine. No cloud required.</p>
 
 <section class="app-card llm-config-card">
-    <h2>AI Provider</h2>
-    <p>Choose the language model for move narration. Your key is stored only in your browser and sent directly to the local server.</p>
+    <h2>AI Model</h2>
+    <p>Choose the language model used for move narration across Game Review and Position Explorer. Your key is stored only in your browser and sent directly to the local server.</p>
 
     <div class="llm-selector-row">
         <div>
             <label class="app-label" for="llm-provider-select">Provider</label>
             <select class="app-select" id="llm-provider-select">
-                <option value="anthropic">Anthropic</option>
-                <option value="openai">OpenAI</option>
+                <!-- populated by JS from server config -->
             </select>
         </div>
         <div>
@@ -24,7 +23,16 @@
                 <!-- populated by JS -->
             </select>
         </div>
+        <div>
+            <label class="app-label" for="llm-effort-select">Reasoning effort</label>
+            <select class="app-select" id="llm-effort-select">
+                <!-- populated by JS -->
+            </select>
+        </div>
     </div>
+    <p class="llm-effort-hint" id="llm-effort-hint" hidden>
+        This model doesn't use a reasoning-effort setting.
+    </p>
 
     <div class="llm-key-label-row">
         <label class="app-label" for="api-key-input">API Key</label>
@@ -85,8 +93,13 @@
     </p>
 </div>
 
+{{ llm_config|json_script:"llm-config-data" }}
 <script>
 document.addEventListener('DOMContentLoaded', () => {
+    // Model registry from the server (config/llm_models.py) — single source of
+    // truth for which providers, models, and efforts appear in the picker.
+    const CONFIG = JSON.parse(document.getElementById('llm-config-data').textContent);
+
     // Server-side key availability from Django context
     const serverKeys = {
         anthropic: {{ has_anthropic_key|yesno:"true,false" }},
@@ -95,6 +108,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const providerSelect = document.getElementById('llm-provider-select');
     const modelSelect    = document.getElementById('llm-model-select');
+    const effortSelect   = document.getElementById('llm-effort-select');
+    const effortHint     = document.getElementById('llm-effort-hint');
     const keyInput       = document.getElementById('api-key-input');
     const saveBtn        = document.getElementById('save-key-btn');
     const savedEl        = document.getElementById('key-saved');
@@ -105,20 +120,50 @@ document.addEventListener('DOMContentLoaded', () => {
         openai:    'sk-proj-…',
     };
 
+    // --- Provider dropdown ---
+    for (const [id, p] of Object.entries(CONFIG.providers)) {
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = p.label;
+        providerSelect.appendChild(opt);
+    }
+
+    // --- Effort dropdown (fixed set; enabled only when the model supports it) ---
+    for (const effort of CONFIG.efforts) {
+        const opt = document.createElement('option');
+        opt.value = effort;
+        opt.textContent = effort.charAt(0).toUpperCase() + effort.slice(1);
+        effortSelect.appendChild(opt);
+    }
+    effortSelect.value = localStorage.getItem('chesslens_llm_effort') || CONFIG.default_effort;
+
+    function currentModelSupportsEffort() {
+        const p = CONFIG.providers[providerSelect.value];
+        const m = (p ? p.models : []).find(m => m.slug === modelSelect.value);
+        return !!(m && m.supports_effort);
+    }
+
+    function updateEffortUI() {
+        const supported = currentModelSupportsEffort();
+        effortSelect.disabled = !supported;
+        effortHint.hidden = supported;
+    }
+
     // Populate model dropdown for the given provider, preserving any saved choice.
     function populateModels(provider) {
         const saved = localStorage.getItem('chesslens_llm_model') || '';
-        const models = ChessLens.MODELS[provider] || [];
+        const p = CONFIG.providers[provider] || { models: [], default_model: '' };
         modelSelect.innerHTML = '';
-        for (const m of models) {
+        for (const m of p.models) {
             const opt = document.createElement('option');
-            opt.value = m.value;
+            opt.value = m.slug;
             opt.textContent = m.label;
             modelSelect.appendChild(opt);
         }
         // Restore saved model if it belongs to this provider, else use default.
-        const match = models.find(m => m.value === saved);
-        modelSelect.value = match ? saved : (ChessLens.DEFAULT_MODELS[provider] || models[0]?.value || '');
+        const match = p.models.find(m => m.slug === saved);
+        modelSelect.value = match ? saved : (p.default_model || p.models[0]?.slug || '');
+        updateEffortUI();
     }
 
     // Update placeholder, server-key badge, and existing-key hint.
@@ -137,10 +182,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Restore saved provider selection.
-    const savedProvider = localStorage.getItem('chesslens_llm_provider') || 'anthropic';
-    providerSelect.value = savedProvider;
-    populateModels(savedProvider);
-    updateKeyUI(savedProvider);
+    const savedProvider = localStorage.getItem('chesslens_llm_provider') || CONFIG.default_provider;
+    providerSelect.value = CONFIG.providers[savedProvider] ? savedProvider : CONFIG.default_provider;
+    populateModels(providerSelect.value);
+    updateKeyUI(providerSelect.value);
 
     providerSelect.addEventListener('change', () => {
         const p = providerSelect.value;
@@ -149,6 +194,12 @@ document.addEventListener('DOMContentLoaded', () => {
         savedEl.hidden = true;
     });
 
+    modelSelect.addEventListener('change', () => {
+        updateEffortUI();
+        savedEl.hidden = true;
+    });
+    effortSelect.addEventListener('change', () => { savedEl.hidden = true; });
+
     function save() {
         const provider = providerSelect.value;
         const model    = modelSelect.value;
@@ -156,6 +207,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         localStorage.setItem('chesslens_llm_provider', provider);
         if (model) localStorage.setItem('chesslens_llm_model', model);
+        localStorage.setItem('chesslens_llm_effort', effortSelect.value);
 
         if (key) {
             const storageKey = provider === 'openai' ? 'openai_api_key' : 'anthropic_api_key';
@@ -169,7 +221,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     saveBtn.addEventListener('click', save);
     keyInput.addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
-    modelSelect.addEventListener('change', () => { savedEl.hidden = true; });
 });
 </script>
 {% endblock %}

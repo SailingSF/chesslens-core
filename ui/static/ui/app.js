@@ -1,34 +1,16 @@
 /*
  * ChessLens UI — shared utilities.
  *
- * LLM settings are stored in localStorage:
+ * LLM settings are stored in localStorage (chosen on the home page; the
+ * available models come from the server config in config/llm_models.py):
  *   chesslens_llm_provider  — "anthropic" (default) or "openai"
- *   chesslens_llm_model     — model name; falls back to provider default
+ *   chesslens_llm_model     — model slug; falls back to provider default
+ *   chesslens_llm_effort    — reasoning effort: "low" | "medium" | "high"
  *   anthropic_api_key       — Anthropic API key override
  *   openai_api_key          — OpenAI API key override
  */
 
 window.ChessLens = {
-
-    // Model lists shown in the provider selector on the home page.
-    MODELS: {
-        anthropic: [
-            { value: 'claude-sonnet-4-6',        label: 'Claude Sonnet 4.6' },
-            { value: 'claude-opus-4-7',           label: 'Claude Opus 4.7' },
-            { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
-        ],
-        openai: [
-            { value: 'gpt-5.5',     label: 'GPT-5.5 (reasoning)' },
-            { value: 'gpt-4.1',     label: 'GPT-4.1' },
-            { value: 'gpt-4.1-mini',label: 'GPT-4.1 Mini' },
-            { value: 'gpt-4o',      label: 'GPT-4o' },
-            { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
-            { value: 'o3',          label: 'o3 (reasoning)' },
-            { value: 'o4-mini',     label: 'o4-mini (reasoning)' },
-        ],
-    },
-
-    DEFAULT_MODELS: { anthropic: 'claude-sonnet-4-6', openai: 'gpt-5.5' },
 
     getLLMProvider() {
         return localStorage.getItem('chesslens_llm_provider') || 'anthropic';
@@ -36,6 +18,10 @@ window.ChessLens = {
 
     getLLMModel() {
         return localStorage.getItem('chesslens_llm_model') || '';
+    },
+
+    getLLMEffort() {
+        return localStorage.getItem('chesslens_llm_effort') || '';
     },
 
     // Return the stored API key for the given (or currently selected) provider.
@@ -53,6 +39,9 @@ window.ChessLens = {
 
         headers['X-LLM-Provider'] = provider;
         if (model) headers['X-LLM-Model'] = model;
+
+        const effort = this.getLLMEffort();
+        if (effort) headers['X-LLM-Reasoning'] = effort;
 
         const key = this.getApiKey(provider);
         if (key) {
