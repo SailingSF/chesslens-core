@@ -55,7 +55,12 @@ _PRUNE_DIRS = {".git", "node_modules", "__pycache__", "tests", ".github"}
 
 def _looks_like_engine(entry: Path) -> bool:
     """True if `entry` is an executable file named like a Stockfish binary."""
-    if not entry.is_file():
+    try:
+        if not entry.is_file():
+            return False
+    except OSError:
+        # e.g. SIP-protected entries under /usr/sbin on macOS raise
+        # PermissionError from stat() when scanning $PATH.
         return False
     if not entry.name.lower().startswith("stockfish"):
         return False

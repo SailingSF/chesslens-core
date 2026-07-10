@@ -57,6 +57,12 @@ def _platform_key() -> str:
 
 class Command(BaseCommand):
     help = "Download an official Stockfish binary into ./engines/."
+    # Django's BaseCommand registers its own --version (prints the Django
+    # version); "resolve" lets ours (the Stockfish version to install) replace
+    # it instead of raising an argparse conflict.
+    def create_parser(self, prog_name, subcommand, **kwargs):
+        kwargs["conflict_handler"] = "resolve"
+        return super().create_parser(prog_name, subcommand, **kwargs)
 
     def add_arguments(self, parser):
         parser.add_argument("--version", default="16.1",
