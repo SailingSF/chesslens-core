@@ -30,7 +30,18 @@ from explanation.retry import retry_overloaded
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 5
-MAX_TOKENS = 1024
+
+# The token budget covers thinking *and* text. Reasoning models spend most of a
+# turn thinking, so this has to leave room for the answer after the thinking —
+# at 1024 the model routinely stopped mid-thought, emitting no text block at all.
+MAX_TOKENS = 4096
+
+# Shown when a turn ends without the model producing any text, so a truncated
+# turn never enters the thread as a blank message.
+TRUNCATED_REPLY = (
+    "I ran out of room before finishing that answer. Ask again, or narrow the "
+    "question to a single line."
+)
 
 
 @dataclass
@@ -179,7 +190,7 @@ class ChatAgent:
 
             fn_calls = [i for i in response.output if getattr(i, "type", None) == "function_call"]
             if not fn_calls:
-                return ChatResult(reply=response.output_text.strip(), tool_calls=tool_calls)
+                return ChatResult(reply=_openai_text(response), tool_calls=tool_calls)
 
             # Echo the model's output items back, then append each tool result.
             for item in response.output:
@@ -198,11 +209,26 @@ class ChatAgent:
         response = await client.responses.create(
             model=model, input=input_items, max_output_tokens=MAX_TOKENS,
         )
-        return ChatResult(reply=response.output_text.strip(), tool_calls=tool_calls)
+        return ChatResult(reply=_openai_text(response), tool_calls=tool_calls)
 
 
 def _anthropic_text(message) -> str:
-    return "".join(b.text for b in message.content if b.type == "text").strip()
+    text = "".join(b.text for b in message.content if b.type == "text").strip()
+    return _require_text(text, message.stop_reason)
+
+
+def _openai_text(response) -> str:
+    return _require_text(response.output_text.strip(), getattr(response, "status", None))
+
+
+def _require_text(text: str, stop_reason) -> str:
+    """A turn that produced no text — the budget ran out during thinking — must
+    not reach the client as an empty reply: the thread would then carry a blank
+    assistant message, which the API rejects on the next turn."""
+    if text:
+        return text
+    logger.warning("Chat turn produced no text (stop_reason=%s)", stop_reason)
+    return TRUNCATED_REPLY
 
 
 # Singleton factory

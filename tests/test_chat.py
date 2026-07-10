@@ -74,6 +74,25 @@ def test_anthropic_loop_executes_tool_then_answers():
     assert client.messages.calls[0]["tools"][0]["name"] == "analyze_position"
 
 
+def test_anthropic_turn_truncated_during_thinking_is_not_blank():
+    """A reasoning model can spend the whole token budget thinking and emit no
+    text block. The reply must never come back blank — the client stores it in
+    the thread and posts it back, where a blank message is rejected."""
+    thinking_block = SimpleNamespace(type="thinking", thinking="Let me work this out...")
+    client = _FakeAnthropic([
+        SimpleNamespace(stop_reason="max_tokens", content=[thinking_block]),
+    ])
+    agent = _make_agent(client)
+    cfg = LLMConfig(model="claude-sonnet-4-6", api_key=None)
+
+    result = asyncio.run(agent.run(
+        [{"role": "user", "content": "Is this winning?"}],
+        system="sys", llm_config=cfg, engine_defaults={},
+    ))
+
+    assert result.reply.strip()
+
+
 # --------------------------------------------------------------------------
 # OpenAI
 # --------------------------------------------------------------------------
